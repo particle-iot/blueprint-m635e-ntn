@@ -48,7 +48,7 @@ ModemManager modem;
 // Start up on Cellular (1) Start up on Satellite (0)
 // NOTE: This is just for testing, you should always start on Cellular and only switch
 // to Satellite if cellular signal drops.
-#define START_ON_CELLULAR (1)
+#define START_ON_CELLULAR (0)
 
 typedef enum AppPublishState {
     WaitForConnnect,
@@ -144,6 +144,7 @@ void updateConnectionTimers(bool force=false) {
 void setup()
 {
     // waitUntil(Serial.isConnected);
+    delay(15s);
     WiFi.clearCredentials(); // force testing on Cellular/Satellite
 
     pinMode(D7, OUTPUT);

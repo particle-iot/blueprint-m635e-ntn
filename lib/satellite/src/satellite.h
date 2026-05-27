@@ -88,6 +88,12 @@ public:
     int getGNSSLocation(unsigned int maxFixWaitTimeMs = 120000);
     int publishLocation();
 
+    // Provide the location used for the NTN location fix (AT+QNWCFG="ntn_locfix").
+    // Stores the coordinates so begin() can program them into the modem before
+    // NTN registration. Must be called before begin() to take effect on the
+    // next registration.
+    int setLocationFix(double lat, double lon, double alt);
+
     int process(bool force = false);
 
     GnssPositioningInfo lastPositionInfo(void) {
@@ -108,6 +114,12 @@ private:
     uint32_t noRegistrationTimer_ = 0;
     int errorCount_ = 0;
     GnssPositioningInfo lastPositionInfo_;
+
+    // NTN location fix coordinates programmed via AT+QNWCFG="ntn_locfix".
+    double locLat_ = 0;
+    double locLon_ = 0;
+    double locAlt_ = 0;
+    bool locFixValid_ = false;
     constrained::CloudProtocol proto_;
 
     char publishBuffer[1024] = {};

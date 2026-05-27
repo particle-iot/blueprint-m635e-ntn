@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024 Particle Industries, Inc.  All rights reserved.
+ * Copyright (c) 2026 Particle Industries, Inc.  All rights reserved.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -18,6 +18,7 @@
 #include "Particle.h"
 #include "satellite.h"
 #include "modem_manager.h"
+#include "config.h"
 
 SYSTEM_MODE(SEMI_AUTOMATIC);
 
@@ -26,35 +27,23 @@ SerialLogHandler logHandler(LOG_LEVEL_ALL);
 Satellite satellite;
 ModemManager modem;
 
-// NOTE: Set both of the following options to 0 for normal operation, or 1 to TEST forced switching between radios
-//       based on the timeouts that follow.  e.g. if FORCE_CELLULAR_TO_SATELLITE_SWITCH is set to 1 and
-//       FORCE_RADIO_CELLULAR_TO_SATELLITE_SWITCH_TIMEOUT is set to 600000, the application will switch from Cellular
-//       to Satellite after 10 minutes.
-#define FORCE_CELLULAR_TO_SATELLITE_SWITCH (0)
-#define FORCE_SATELLITE_TO_CELLULAR_SWITCH (0)
-#define FORCE_RADIO_CELLULAR_TO_SATELLITE_SWITCH_TIMEOUT (10 * 60 * 1000)
-#define FORCE_RADIO_SATELLITE_TO_CELLULAR_SWITCH_TIMEOUT (10 * 60 * 1000)
+// -----------------------------------------------------------------------------
+// Application state machine
+// -----------------------------------------------------------------------------
+enum class AppState {
+    Boot,              // init: enable the start radio, reset timers
+    CellularConnect,   // Particle.connect() issued; waiting for the cloud
+    CellularOnline,    // connected on LTE; publishing on the LTE interval
+    AcquireLocation,   // get a GPS fix (or fixed fallback) and set ntn_locfix
+    SatelliteConnect,  // satellite.begin()/connect(); waiting for NTN registration
+    SatelliteOnline,   // connected on NTN; publishing on the NTN interval
+    SwitchToSatellite, // tear down cloud + cellular, enable the Satellite radio
+    SwitchToCellular,  // tear down satellite, enable the Cellular radio
+    Fault              // error / recovery (modem-reset escalation hook)
+};
 
-// These are pretty standard timeouts.  It is NOT recommended to set them below 10 minutes.
-// There is no CELLULAR_CONNECTED_TIMEOUT because if it's connected there's no reason to switch to satellite.
-// Satellite can take a long time to initially connect so it's not recommended to set the DISCONN. timeout too low.
-#define CELLULAR_DISCONNECTED_TIMEOUT (10 * 60 * 1000)
-#define SATELLITE_CONNECTED_TIMEOUT (10 * 60 * 1000)
-#define SATELLITE_DISCONNECTED_TIMEOUT (20 * 60 * 1000)
-
-// NOT recommended to set the publish interval below 10 seconds when on satellite
-#define PUBLISH_INTERVAL (30000)
-
-// Start up on Cellular (1) Start up on Satellite (0)
-// NOTE: This is just for testing, you should always start on Cellular and only switch
-// to Satellite if cellular signal drops.
-#define START_ON_CELLULAR (0)
-
-typedef enum AppPublishState {
-    WaitForConnnect,
-    GetGNSSLocation,
-    PublishGNSSLocation
-} AppPublishState;
+static AppState appState = AppState::Boot;
+static bool stateEntry = true;   // true on the first loop() after a transition
 
 uint32_t lastPublish = 0;
 uint32_t connectedStartTime = 0;
@@ -66,8 +55,131 @@ uint32_t radioTime = 0;
 int publishCount = 1;
 int satPublishSuccess = 0;
 int satPublishFailures = 0;
-AppPublishState publishState = AppPublishState::WaitForConnnect;
 
+// Location used for outgoing publishes (decimal degrees / metres). Populated
+// from a GPS fix or the fixed fallback; reused until refreshed.
+double pubLat = 0;
+double pubLon = 0;
+double pubAlt = 0;
+bool havePubLoc = false;
+
+const char* stateName(AppState s) {
+    switch (s) {
+        case AppState::Boot:              return "Boot";
+        case AppState::CellularConnect:   return "CellularConnect";
+        case AppState::CellularOnline:    return "CellularOnline";
+        case AppState::AcquireLocation:   return "AcquireLocation";
+        case AppState::SatelliteConnect:  return "SatelliteConnect";
+        case AppState::SatelliteOnline:   return "SatelliteOnline";
+        case AppState::SwitchToSatellite: return "SwitchToSatellite";
+        case AppState::SwitchToCellular:  return "SwitchToCellular";
+        case AppState::Fault:             return "Fault";
+        default:                          return "Unknown";
+    }
+}
+
+void transitionTo(AppState next) {
+    Log.info("STATE: %s -> %s", stateName(appState), stateName(next));
+    appState = next;
+    stateEntry = true;
+}
+
+// True only on the first loop() iteration after entering the current state.
+// Used to run one-shot entry actions (e.g. begin()/connect()).
+bool onEntry() {
+    bool e = stateEntry;
+    stateEntry = false;
+    return e;
+}
+
+// Should we leave Cellular for Satellite? Driven by the disconnect timer (or the
+// force flag for bench testing). Never true if NTN is disabled.
+bool cellularShouldSwitchToSatellite() {
+#if !FEATURE_NTN_ENABLED
+    return false;
+#elif FORCE_CELLULAR_TO_SATELLITE_SWITCH
+    return radioTime && (millis() - radioTime > FORCE_C2S_SWITCH_TIMEOUT_MS);
+#else
+    return disconnectedStartTime && (millis() - disconnectedStartTime > CELLULAR_DISCONNECTED_TIMEOUT_MS);
+#endif
+}
+
+// Should we leave Satellite for Cellular? We don't camp on Satellite if Cellular
+// might be available - go test it again after the connected/disconnected
+// timeout. Never true if LTE is disabled.
+bool satelliteShouldSwitchToCellular() {
+#if !FEATURE_LTE_ENABLED
+    return false;
+#elif FORCE_SATELLITE_TO_CELLULAR_SWITCH
+    return radioTime && (millis() - radioTime > FORCE_S2C_SWITCH_TIMEOUT_MS);
+#else
+    return (disconnectedStartTime && (millis() - disconnectedStartTime > SATELLITE_DISCONNECTED_TIMEOUT_MS)) ||
+           (connectedStartTime && (millis() - connectedStartTime > SATELLITE_CONNECTED_TIMEOUT_MS));
+#endif
+}
+
+// Acquire the location to program into the modem's NTN location fix, per the
+// configured LOC_SOURCE, then hand it to the satellite library. Called once on
+// entry to NTN (not on every publish).
+void acquireAndSetLocationFix() {
+    double lat = LOC_FIXED_LATITUDE;
+    double lon = LOC_FIXED_LONGITUDE;
+    double alt = LOC_FIXED_ALTITUDE;
+    bool haveFix = false;
+
+#if LOC_SOURCE == LOC_SOURCE_GPS_FIXED_FALLBACK
+    Log.info("Acquiring GPS fix (timeout %lu ms)...", (unsigned long)LOC_GPS_FIX_TIMEOUT_MS);
+    if (satellite.getGNSSLocation(LOC_GPS_FIX_TIMEOUT_MS) == 0) {
+        auto p = satellite.lastPositionInfo();
+        lat = p.latitude;
+        lon = p.longitude;
+        alt = p.altitude;
+        haveFix = true;
+        Log.info("Using GPS fix for NTN location");
+    } else {
+        Log.warn("GPS fix not acquired; using fixed fallback location");
+    }
+#else
+    Log.info("Using fixed location for NTN");
+#endif
+
+    pubLat = lat;
+    pubLon = lon;
+    pubAlt = alt;
+    havePubLoc = true;
+    satellite.setLocationFix(lat, lon, alt);
+}
+
+// Build the location payload and route it to the active publish stack.
+void publishLocationData() {
+    auto now = (unsigned int)Time.now();
+
+    particle::Variant locEvent;
+    locEvent.set("cmd", "loc");
+    locEvent.set("time", now);
+    particle::Variant locationObject;
+        locationObject.set("lck", havePubLoc ? 1 : 0);
+        locationObject.set("time", now);
+        locationObject.set("lat", pubLat);
+        locationObject.set("lon", pubLon);
+        locationObject.set("alt", pubAlt);
+    locEvent.set("loc", locationObject);
+
+    Log.info("publishing location %s", locEvent.toJSON().c_str());
+
+    if (satellite.connected()) {
+        Log.info("SATELLITE PUBLISH: {\"count\":%d} ------------------", publishCount);
+        auto satPublishResult = satellite.publish(1 /* code */, locEvent);
+        satPublishResult < 0 ? satPublishFailures++ : satPublishSuccess++;
+        Log.info("Satellite publish successes/total %d/%d ", satPublishSuccess, satPublishSuccess + satPublishFailures);
+        publishCount++;
+    } else if (Particle.connected()) {
+        Log.info("CELLULAR PUBLISH: {\"count\":%d} ------------------", publishCount);
+        auto cloudPublishResult = Particle.publish("loc", locEvent);
+        Log.info("Cellular publish result: %d", cloudPublishResult);
+        publishCount++;
+    }
+}
 
 void updateConnectionTimers(bool force=false) {
     int connected = 0;
@@ -143,197 +255,200 @@ void updateConnectionTimers(bool force=false) {
 
 void setup()
 {
-    // waitUntil(Serial.isConnected);
-    delay(15s);
+    waitFor(Serial.isConnected, 10000);
     WiFi.clearCredentials(); // force testing on Cellular/Satellite
 
     pinMode(D7, OUTPUT);
     digitalWrite(D7, LOW);
 
-    // Make sure we start up with Cellular enabled,
-    // it is less expensive and can handle larger payloads.
-    Log.info("RADIO CELLULAR --------------------");
     modem.begin();
 
-#if START_ON_CELLULAR
-    // Start on Cellular
-    modem.radioEnable(RADIO_CELLULAR);
-    updateConnectionTimers(true /* forced log */);
-
-    Particle.connect();
-    waitFor(Particle.connected, 120000);
-
-#else
-    // Start on Satellite
-    modem.radioEnable(RADIO_SATELLITE);
-    updateConnectionTimers(true /* forced log */);
-    RGB.control(true);
-    RGB.color(0,255,0);
-
-    if (satellite.begin() == SYSTEM_ERROR_NONE) {
-        satellite.process();
-
-        satellite.connect();
-    } else {
-        Log.error("Error initializing Satellite radio");
-        RGB.color(255,0,0);
-    }
-#endif // START_ON_CELLULAR
+    // Hardware is initialised; the Boot state selects and enables the start radio.
+    appState = AppState::Boot;
+    stateEntry = true;
 }
 
 void loop()
 {
     updateConnectionTimers();
 
-    // If on Cellular connection, if no signal for 10 minutes, switch to Satellite
-    if ( (modem.radioEnabled() == RADIO_CELLULAR) &&
-
-#if FORCE_CELLULAR_TO_SATELLITE_SWITCH
-            (radioTime && (millis() - radioTime > FORCE_RADIO_CELLULAR_TO_SATELLITE_SWITCH_TIMEOUT))
+    switch (appState) {
+        // --------------------------------------------------------------------
+        case AppState::Boot:
+        {
+#if START_ON_CELLULAR && FEATURE_LTE_ENABLED
+            // Cellular first
+            Log.info("RADIO CELLULAR --------------------");
+            modem.radioEnable(RADIO_CELLULAR);
+            updateConnectionTimers(true /* forced log */);
+            RGB.control(false);
+            Particle.connect();
+            transitionTo(AppState::CellularConnect);
 #else
-            (disconnectedStartTime && (millis() - disconnectedStartTime > CELLULAR_DISCONNECTED_TIMEOUT))
-#endif // FORCE_RADIO_CELLULAR_TO_SATELLITE_SWITCH_TIMEOUT
-            )
-    {
-        Log.info("SWITCH to SATELLITE --------------------");
-        // NOTE: Very important to disconnect both Cloud and Cellular before switching to Satellite
-        Particle.disconnect();
-        waitFor(Particle.disconnected, 60000);
-        Cellular.disconnect();
-
-        Log.info("RADIO SATELLITE --------------------");
-        if (modem.radioEnable(RADIO_SATELLITE) == SYSTEM_ERROR_NONE) {
+            // NTN-first demo: start on Satellite.
+            Log.info("RADIO SATELLITE --------------------");
+            modem.radioEnable(RADIO_SATELLITE);
             updateConnectionTimers(true /* forced log */);
             RGB.control(true);
             RGB.color(0,255,0);
-
-            Log.info("SATELLITE BEGIN --------------------");
-            if (satellite.begin() == SYSTEM_ERROR_NONE) {
-                satellite.process();
-
-                Log.info("SATELLITE CONNECT ---------------------");
-                satellite.connect();
-            } else {
-                Log.error("Error initializing Satellite radio");
-                RGB.color(255,0,0);
-            }
+            transitionTo(AppState::AcquireLocation);
+#endif
+            break;
         }
-        publishState = AppPublishState::WaitForConnnect;
-    }
-    // If on Satellite connection, if connected or disconnected for 10 minutes, switch to Cellular
-    //
-    // Note: we don't want to camp on Satellite if Cellular is available, but
-    //       the only way to know if Cellular is available is to go test it again.
-    else if ( (modem.radioEnabled() == RADIO_SATELLITE) &&
 
-#if FORCE_SATELLITE_TO_CELLULAR_SWITCH
-            (radioTime && (millis() - radioTime > FORCE_RADIO_SATELLITE_TO_CELLULAR_SWITCH_TIMEOUT))
-#else
-            ( (disconnectedStartTime && (millis() - disconnectedStartTime > SATELLITE_DISCONNECTED_TIMEOUT)) || (connectedStartTime && (millis() - connectedStartTime > SATELLITE_CONNECTED_TIMEOUT)) )
-#endif // FORCE_RADIO_SATELLITE_TO_CELLULAR_SWITCH_TIMEOUT
-            )
-    {
-        Log.info("SWITCH to CELLULAR --------------------");
-        // NOTE: Very important to disconnect Satellite before switching to Cellular
-        satellite.disconnect();
-        satellite.process(); // process disconnect
-        RGB.control(false);
-
-        Log.info("RADIO CELLULAR --------------------");
-        if (modem.radioEnable(RADIO_CELLULAR) == SYSTEM_ERROR_NONE) {
-            updateConnectionTimers(true /* forced log */);
-
-            Log.info("CELLULAR CONNECT ---------------------");
-            Particle.connect();
-            waitFor(Particle.connected, 120000);
-        }
-        publishState = AppPublishState::WaitForConnnect;
-    }
-
-    // Attempt to publish
-    if (millis() - lastPublish > PUBLISH_INTERVAL) {
-        // Handle publish differently based on connection type, also publish location
-        switch (publishState) {
-            case AppPublishState::WaitForConnnect:
-            {
-                if (satellite.connected() || Particle.connected()) {
-                    publishState = AppPublishState::GetGNSSLocation;
-                }
+        // --------------------------------------------------------------------
+        case AppState::CellularConnect:
+        {
+            if (cellularShouldSwitchToSatellite()) {
+                transitionTo(AppState::SwitchToSatellite);
                 break;
             }
+            if (Particle.connected()) {
+                transitionTo(AppState::CellularOnline);
+            }
+            break;
+        }
 
-            case AppPublishState::GetGNSSLocation:
-            {
-                satellite.getGNSSLocation();
-                if (modem.radioEnabled() == RADIO_SATELLITE) {
-                    // Make sure we re-connect to Skylo NTN after getting gnss fix
-                    satellite.process(true /* force updateRegistration */);
-                }
-                lastPublish = millis() - PUBLISH_INTERVAL + 2000; // Ensure we don't try to publish immediately after using GNSS
-                publishState = AppPublishState::PublishGNSSLocation;
+        // --------------------------------------------------------------------
+        case AppState::CellularOnline:
+        {
+            if (cellularShouldSwitchToSatellite()) {
+                transitionTo(AppState::SwitchToSatellite);
                 break;
             }
-
-            case AppPublishState::PublishGNSSLocation:
-            {
-                auto now = (unsigned int)Time.now();
-
-                particle::Variant locEvent;
-                locEvent.set("cmd", "loc");
-                locEvent.set("time", now);
-                particle::Variant locationObject;
-                    locationObject.set("lck", 1);
-                    locationObject.set("time", now);
-                    locationObject.set("lat", satellite.lastPositionInfo().latitude);
-                    locationObject.set("lon", satellite.lastPositionInfo().longitude);
-                    locationObject.set("alt", satellite.lastPositionInfo().altitude);
-                locEvent.set("loc", locationObject);
-
-                CloudEvent event;
-                event.name("loc");
-                event.data(locEvent);
-
-                Log.info("publishing location %s", locEvent.toJSON().c_str());
-
-                if (satellite.connected())
-                {
-                    Log.info("SATELLITE PUBLISH: {\"count\",%d} ------------------", publishCount);    
-                    auto satPublishResult = satellite.publish(1 /* code */, locEvent);
-                    
-                    satPublishResult < 0 ? satPublishFailures++ : satPublishSuccess++;
-                    Log.info("Satellite publish successes/total %d/%d ", satPublishSuccess, satPublishSuccess + satPublishFailures);
-                    lastPublish = millis();
+            if (Particle.connected() && (millis() - lastPublish > LTE_PUBLISH_INTERVAL_MS)) {
+                // Refresh location for the LTE publish where a fix is available.
+                if (satellite.getGNSSLocation(LOC_GPS_FIX_TIMEOUT_MS) == 0) {
+                    auto p = satellite.lastPositionInfo();
+                    pubLat = p.latitude;
+                    pubLon = p.longitude;
+                    pubAlt = p.altitude;
+                    havePubLoc = true;
                 }
-                else if (Particle.connected())
-                {
-                    Log.info("CELLULAR PUBLISH: {\"count\",%d} ------------------", publishCount);
-                    Particle.publish("cellular", String::format("{\"count\",%d}", publishCount));
+                publishLocationData();
+                lastPublish = millis();
+            }
+            break;
+        }
 
-                    auto cloudPublishResult = Particle.publish("loc", locEvent);
-                    Log.info("Cellular publish result: %d", cloudPublishResult);
-                    lastPublish = millis();
-                } else {
-                    publishState = AppPublishState::WaitForConnnect;
+        // --------------------------------------------------------------------
+        case AppState::AcquireLocation:
+        {
+            // Acquire the location once and program the modem's NTN location fix
+            // before attempting registration.
+            acquireAndSetLocationFix();
+            transitionTo(AppState::SatelliteConnect);
+            break;
+        }
+
+        // --------------------------------------------------------------------
+        case AppState::SatelliteConnect:
+        {
+            if (onEntry()) {
+                Log.info("SATELLITE BEGIN --------------------");
+                if (satellite.begin() != SYSTEM_ERROR_NONE) {
+                    Log.error("Error initializing Satellite radio");
+                    RGB.color(255,0,0);
+                    transitionTo(AppState::Fault);
                     break;
                 }
-
-                publishCount++;
-                publishState = AppPublishState::GetGNSSLocation;
-                break;
+                satellite.process();
+                Log.info("SATELLITE CONNECT ---------------------");
+                satellite.connect();
             }
 
-            default:
+            satellite.process();
+
+            if (satelliteShouldSwitchToCellular()) {
+                transitionTo(AppState::SwitchToCellular);
                 break;
+            }
+            if (satellite.connected()) {
+                transitionTo(AppState::SatelliteOnline);
+            }
+            break;
         }
 
-    }
+        // --------------------------------------------------------------------
+        case AppState::SatelliteOnline:
+        {
+            satellite.process();
+            if (satellite.connected()) {
+                RGB.color(0,255,255);
+            }
 
-    if (modem.radioEnabled() == RADIO_SATELLITE) {
-        satellite.process();
-
-        if (satellite.connected()) {
-            RGB.color(0,255,255);
+            if (satelliteShouldSwitchToCellular()) {
+                transitionTo(AppState::SwitchToCellular);
+                break;
+            }
+            if (satellite.connected() && (millis() - lastPublish > NTN_PUBLISH_INTERVAL_MS)) {
+                // Publish using the location cached on NTN entry.
+                publishLocationData();
+                lastPublish = millis();
+            }
+            break;
         }
+
+        // --------------------------------------------------------------------
+        case AppState::SwitchToSatellite:
+        {
+            Log.info("SWITCH to SATELLITE --------------------");
+            // NOTE: Very important to disconnect both Cloud and Cellular before switching to Satellite
+            Particle.disconnect();
+            waitFor(Particle.disconnected, 60000);
+            Cellular.disconnect();
+
+            Log.info("RADIO SATELLITE --------------------");
+            if (modem.radioEnable(RADIO_SATELLITE) == SYSTEM_ERROR_NONE) {
+                updateConnectionTimers(true /* forced log */);
+                RGB.control(true);
+                RGB.color(0,255,0);
+                transitionTo(AppState::AcquireLocation);
+            } else {
+                Log.error("Failed to enable Satellite radio");
+                transitionTo(AppState::Fault);
+            }
+            break;
+        }
+
+        // --------------------------------------------------------------------
+        case AppState::SwitchToCellular:
+        {
+            Log.info("SWITCH to CELLULAR --------------------");
+            // NOTE: Very important to disconnect Satellite before switching to Cellular
+            satellite.disconnect();
+            satellite.process(); // process disconnect
+            RGB.control(false);
+
+            Log.info("RADIO CELLULAR --------------------");
+            if (modem.radioEnable(RADIO_CELLULAR) == SYSTEM_ERROR_NONE) {
+                updateConnectionTimers(true /* forced log */);
+                Log.info("CELLULAR CONNECT ---------------------");
+                Particle.connect();
+                transitionTo(AppState::CellularConnect);
+            } else {
+                Log.error("Failed to enable Cellular radio");
+                transitionTo(AppState::Fault);
+            }
+            break;
+        }
+
+        // --------------------------------------------------------------------
+        case AppState::Fault:
+        {
+            // Placeholder for recovery / modem-reset escalation (future work).
+            // For now, surface the fault and re-initialise from Boot.
+            Log.error("FAULT state - re-initialising");
+            RGB.control(true);
+            RGB.color(255,0,0);
+            delay(5000);
+            transitionTo(AppState::Boot);
+            break;
+        }
+
+        default:
+            transitionTo(AppState::Fault);
+            break;
     }
 }
 

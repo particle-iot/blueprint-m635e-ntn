@@ -297,9 +297,15 @@ int Satellite::begin() { // (const SatelliteConfig& conf) {
     Cellular.command(2000, "AT+COPS=3,0\r\n");
     // 0000139019 [ncp.at] TRACE: < +QGPSLOC: 181642.000,3804.3821N,12209.9418W,2.0,95.4,3,0.00,0.0,0.0,070526,03
 
-    // Cellular.command(2000, "AT+QNWCFG=\"ntn_locfix\",0");
-    // // Cellular.command(2000, "AT+QNWCFG=\"ntn_locfix\",1,38.07315,-122.16545,111.8");
-    // Cellular.command(2000, "AT+QNWCFG=\"ntn_locfix\"");
+    // Program the NTN location fix before registration. Skylo NTN attach
+    // requires a location; set it here (from a GPS fix or fixed fallback
+    // provided via setLocationFix())
+    if (locFixValid_) {
+        Cellular.command(2000, "AT+QNWCFG=\"ntn_locfix\",1,%f,%f,%f", locLat_, locLon_, locAlt_);
+        Cellular.command(2000, "AT+QNWCFG=\"ntn_locfix\"");
+    } else {
+        Log.warn("No NTN location fix set before begin(); skipping ntn_locfix");
+    }
 
     if (isRegistered()) {
         registered_ = 1;
@@ -545,6 +551,15 @@ int Satellite::getGNSSLocation(unsigned int maxFixWaitTimeMs) {
         lastPositionInfo_ = info;
     }
     return info.valid == 1 ? 0 : -1;
+}
+
+int Satellite::setLocationFix(double lat, double lon, double alt) {
+    locLat_ = lat;
+    locLon_ = lon;
+    locAlt_ = alt;
+    locFixValid_ = true;
+    Log.info("NTN location fix set to %.5lf, %.5lf, ALT:%.1lf", lat, lon, alt);
+    return 0;
 }
 
 int Satellite::publishLocation() {

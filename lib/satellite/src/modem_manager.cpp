@@ -75,7 +75,7 @@ namespace {
 #define ICCID_KIGEN_DEFAULT     "89000123456789012358"
 #define ICCID_KIGEN_TEST        "89000123456789012341"
 #define ICCID_TWILIO_PREFIX     "8988"
-#define ICCID_SKYLO_PREFIX      "8990"
+#define ICCID_SKYLO_PREFIX      "89883"
 #define ICCID_PREFIX_LEN        (4)
 #define ICCID_RESULTS_MAX       (8)
 #define ICCID_MARKER            "5A0A"
@@ -548,15 +548,15 @@ int ModemManager::radioEnable(radio_type_t radioType) {
     // Find the ICCID by radio type
     esimProfiles(NULL, profiles, PROFILES_SIZE_MAX);
 
-    char specifiedIccid[ICCID_LEN + 1] = {0};
-    if (findIccidByType(profiles, strlen(profiles), specifiedIccid, radioType) != 0) {
-        Log.error("Could not find requested radio_type!");
-        return -1;
-    }
+    // char specifiedIccid[ICCID_LEN + 1] = {0};
+    // if (findIccidByType(profiles, strlen(profiles), specifiedIccid, radioType) != 0) {
+    //     Log.error("Could not find requested radio_type: %d", radioType);
+    //     return -1;
+    // }
 
-    if (enableDisableProfile(ICCID_ENABLE, specifiedIccid, radioType) == ENABLE_DISABLE_SUCCESS) {
+    // if (enableDisableProfile(ICCID_ENABLE, specifiedIccid, radioType) == ENABLE_DISABLE_SUCCESS) {
         cachedRadioType_ = radioType;
-    }
+    // }
 
     return 0;
 }

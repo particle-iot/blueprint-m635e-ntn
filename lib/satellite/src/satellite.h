@@ -116,6 +116,9 @@ private:
     static int cbICCID(int type, const char* buf, int len, char* iccid);
     static int cbCOPS(int type, const char* buf, int len, char* network);
     static int cbQCFGEXTquery(int type, const char* buf, int len, int* rxlen);
+    static int cbQIRDquery(int type, const char* buf, int len, int* rxlen);
+    static int cbQIRD(int type, const char* buf, int len, char* outBuf);
+    static int cbQISENDEX(int type, const char* buf, int len, int* param);
     static int cbQCFGEXTread(int type, const char* buf, int len, char* rxdata);
     static int cbQGPSLOC(int type, const char* buf, int len, GnssPositioningInfo* info);
 

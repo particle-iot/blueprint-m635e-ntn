@@ -32,6 +32,11 @@ LOG_SOURCE_CATEGORY("ncp.client");
 #include <pb_encode.h>
 #include <cloud/cloud_new.pb.h>
 
+#define USE_NON_IP 0
+// #define UDP_ENDPOINT_NAME "publish-receiver-udp.particle.io"
+#define UDP_ENDPOINT_NAME "3.80.138.180"
+#define UDP_PORT 40000
+
 /*
 // List of all defined system errors
     NONE                        0
@@ -142,6 +147,40 @@ int Satellite::cbQCFGEXTquery(int type, const char* buf, int len, int* rxlen)
     return WAIT;
 }
 
+int Satellite::cbQIRDquery(int type, const char* buf, int len, int* rxlen)
+{
+    Log.info("%s", buf);
+    //+QIRD: <total_receive_length>,<have_read_length>,<unread_length>
+    if (rxlen) {
+        auto ret = sscanf(buf, "\r\n+QIRD: %*d,%*d,%d\r\n", rxlen);
+        // Log.info("ret: %d rxLen: %d", ret, *rxlen);
+    }
+    return WAIT;
+}
+
+int Satellite::cbQIRD(int type, const char* buf, int len, char* outBuf) {
+  // Log.info("%s", buf);
+  static int incomingPacketLength = 0;
+  if (incomingPacketLength == 0) {
+    auto ret = sscanf(buf, "\r\n+QIRD: %d\r\n", &incomingPacketLength);
+    // Log.info("ret: %d incomingPacketLength: %d", ret, incomingPacketLength);
+  } else if(outBuf){
+    strncpy(outBuf, &buf[2], incomingPacketLength);
+    incomingPacketLength = 0;
+  }
+
+  return WAIT;
+}
+
+int Satellite::cbQISENDEX(int type, const char* buf, int len, int* param)
+{
+    // Log.info("%s", buf);
+    if (strcmp(buf, "\r\nSEND OK\r\n") == 0) {
+        return RESP_OK;
+    }
+    return WAIT;
+}
+
 int Satellite::cbQCFGEXTread(int type, const char* buf, int len, char* rxdata)
 {
     if ((type == TYPE_PLUS) && rxdata) {
@@ -184,6 +223,7 @@ int Satellite::getICCID(char* i, bool log) {
 int Satellite::isRegistered() {
     int reg = 0;
     char network[32] = "";
+    Cellular.command(2000, "AT+CEREG?\r\n");
     if ((RESP_OK == Cellular.command(cbCOPS, network, 10000, "AT+COPS?\r\n"))
             && (strcmp(network,"") != 0))
     {
@@ -255,17 +295,23 @@ int Satellite::begin() { // (const SatelliteConfig& conf) {
     Cellular.command(2000, "AT+CEREG=2\r\n");
     Cellular.command(2000, "AT+CEREG?\r\n");
     Cellular.command(2000, "AT+COPS=3,0\r\n");
+    // 0000139019 [ncp.at] TRACE: < +QGPSLOC: 181642.000,3804.3821N,12209.9418W,2.0,95.4,3,0.00,0.0,0.0,070526,03
+
+    // Cellular.command(2000, "AT+QNWCFG=\"ntn_locfix\",0");
+    // // Cellular.command(2000, "AT+QNWCFG=\"ntn_locfix\",1,38.07315,-122.16545,111.8");
+    // Cellular.command(2000, "AT+QNWCFG=\"ntn_locfix\"");
+
     if (isRegistered()) {
         registered_ = 1;
         Log.info("SKIPPING THE FOLLOWING COMMANDS:\n"
             "\"AT+CFUN=0\"\n"
-            "\"AT+CGDCONT=1,\"Non-IP\",\"particle.io\"\n"
+            "\"AT+CGDCONT=1,\"IP\",\"360Connect\"\n"
             "\"AT+QCFG=\"nwscanmode\",3,1\n"
             "\"AT+QCFG=\"iotopmode\",3,1\n"
             "\"AT+CFUN=1\n");
     } else {
         Cellular.command(180000, "AT+CFUN=0\r\n");
-        Cellular.command(2000, "AT+CGDCONT=1,\"Non-IP\",\"particle.io\"");
+        Cellular.command(2000, "AT+CGDCONT=1,\"IP\",\"360Connect\"");
         Cellular.command(2000, "AT+QCFG=\"nwscanmode\",3,1\r\n"); // LTE (includes NTN)
         Cellular.command(2000, "AT+QCFG=\"iotopmode\",3,1\r\n");  // NTN only
         Cellular.command(180000, "AT+CFUN=1\r\n");
@@ -288,7 +334,6 @@ int Satellite::begin() { // (const SatelliteConfig& conf) {
 int Satellite::connect() {
     nwConnectionDesired = NW_STATE_CONNECT;
     nwConnected = NW_CONNECTED_INIT;
-
     return 0;
 }
 
@@ -305,6 +350,8 @@ int Satellite::connectImpl() {
             if (isRegistered()) {
                 Cellular.command(2000, "AT+CEREG?\r\n");
                 int r = 0;
+
+#if USE_NON_IP
                 r = Cellular.command(2000, "AT+QCFGEXT=\"nipdcfg\",0,\"particle.io\"\r\n");
                 if (r == RESP_OK) {
                     r = Cellular.command(2000, "AT+QCFGEXT=\"nipdcfg\"\r\n");
@@ -316,6 +363,24 @@ int Satellite::connectImpl() {
                     ntnConnected = 0;
                     nwConnected = NW_CONNECTED_FAILED;
                 }
+#else 
+                Cellular.command(2000, "AT+QICSGP=1");
+                Cellular.command(2000, "AT+QIACT?");
+
+                Cellular.command(2000, "AT+QICSGP=1,1,\"360Connect\"");
+                r = Cellular.command(150 * 1000, "AT+QIACT=1");
+                Cellular.command(2000, "AT+QIACT?");
+                
+                r = Cellular.command(150 * 1000, "AT+QIOPEN=1,0,\"UDP\",\"%s\",%d", UDP_ENDPOINT_NAME, UDP_PORT);
+                // r = Cellular.command(150 * 1000, "AT+QIOPEN=1,0,\"UDP\",\"100.95.0.251\",%d", UDP_PORT);
+                // Cellular.command(2000, "AT+QCSCON=1");
+                if (r == RESP_OK) {
+                    ntnConnected = NW_CONNECTED_SUCCESS;
+                } else {
+                    Cellular.command(2000, "AT+QISTATE?");
+                    ntnConnected = NW_CONNECTED_FAILED;
+                }
+#endif
             } else {
                 nwConnected = NW_CONNECTED_INIT;
                 ntnConnected = 0;
@@ -386,15 +451,25 @@ void Satellite::receiveData(void) {
     if (registered_ && connected() && millis() - lastReceivedCheck_ >= SATELLITE_NCP_RECEIVE_UPDATE_MS) {
         lastReceivedCheck_ = millis();
         int recv = 0;
-        if ((RESP_OK == Cellular.command(cbQCFGEXTquery, &recv, 10000, "AT+QCFGEXT=\"nipdr\",0\r\n"))
-                && (recv > 0))
-        {
-            // Receive hex data
-            char rxData[320] = "";
-            if ((RESP_OK == Cellular.command(cbQCFGEXTread, rxData, 10000, "AT+QCFGEXT=\"nipdr\",%d,1\r\n", recv))
-                && (strcmp(rxData,"") != 0))
-            {
+        char rxData[320] = "";
+        int atResponse = 0;
 
+#if USE_NON_IP
+        atResponse = Cellular.command(cbQCFGEXTquery, &recv, 10000, "AT+QCFGEXT=\"nipdr\",0\r\n");
+#else 
+        Cellular.command(2000, "AT+QISTATE?");
+        atResponse = Cellular.command(cbQIRDquery, &recv, 60 * 1000, "AT+QIRD=0,0");
+#endif
+        if ((RESP_OK == atResponse) && (recv > 0))
+        {
+#if USE_NON_IP
+            atResponse = Cellular.command(cbQCFGEXTread, rxData, 10000, "AT+QCFGEXT=\"nipdr\",%d,1\r\n", recv);
+#else 
+            atResponse = Cellular.command(cbQIRD, rxData, 10000, "AT+QIRD=0,%d", recv);
+#endif
+            // Receive hex data
+            if ((RESP_OK == atResponse) && (strcmp(rxData,"") != 0))
+            {
                 Log.info("%d BYTES RECEIVED!", recv);
                 // General counter response - 806006
                 // Diagnostics request - 830000120306071A
@@ -420,12 +495,24 @@ int Satellite::tx(const uint8_t* buf, size_t len, int port) {
     if (!hexBuf) {
         return SYSTEM_ERROR_NO_MEMORY;
     }
-    toHex(buf, len, hexBuf.get(), hexBufSize);
+    memset(hexBuf.get(), 0, hexBufSize);
+    auto hexLength = toHex(buf, len, hexBuf.get(), hexBufSize);
+    Log.info("TX %d->%d bytes: %s", len, hexLength, hexBuf.get());
+    Log.info("bytes: %s", hexBuf.get()[130]);
+
+
+#if USE_NON_IP
+    auto r = Cellular.command(2000, "AT+QCFGEXT=\"nipds\",1,\"%s\",%d\r\n", hexBuf.get(), len);
+#else
+    int dummy;
+    auto r = Cellular.command(2000, "AT+QISENDEX=0,\"test\",0"); // TODO: FIX THIS
+    r = Cellular.command(cbQISENDEX, &dummy, 2000, "AT+QISENDEX=0,\"%s\",0", hexBuf.get());
+#endif
     // Send hex data
-    if (RESP_OK == Cellular.command(2000, "AT+QCFGEXT=\"nipds\",1,\"%s\",%d\r\n", hexBuf.get(), len)) {
-        Log.info("%d BYTES SENT!\r\n", len);
+    if (RESP_OK == r) {
+        Log.info("Bytes Sent %d", hexLength);
     } else {
-        Log.error("ERROR SENDING DATA!");
+        Log.error("Error sending: %d bytes: %d", r, hexLength);
         errorCount_++;
         return -1;
     }

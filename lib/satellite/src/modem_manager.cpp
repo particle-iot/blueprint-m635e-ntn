@@ -204,7 +204,7 @@ int ModemManager::findIccids(const char *input, char results[][ICCID_LEN + 1], b
 int ModemManager::getICCID(char* i, bool log) {
     char iccid[30] = {0};
 
-    int ret = Cellular.command(cbICCID, iccid, 10000, "AT+QCCID\r\n");
+    int ret = Cellular.command(cbICCID, iccid, 10000, "AT+QCCID");
     if ((ret == RESP_OK) && (strcmp(iccid, "") != 0)) {
         // Log.info("SIM ICCID = %s", iccid);
     } else {
@@ -219,18 +219,19 @@ int ModemManager::getICCID(char* i, bool log) {
         return -2;
     } else {
         if (log) {
-            Log.info("ICCID currently active: %s ", iccid);
+            const char* simType;
             if (strcmp(iccid, ICCID_KIGEN_DEFAULT) == 0) {
-                LOG_PRINTF(TRACE, "(Kigen Default Profile)\n");
+                simType = "Kigen Default Profile";
             } else if (strcmp(iccid, ICCID_KIGEN_TEST) == 0) {
-                LOG_PRINTF(TRACE, "(Kigen Test Profile)\n");
+                simType = "Kigen Test Profile";
             } else if (strncmp(iccid, ICCID_TWILIO_PREFIX, ICCID_PREFIX_LEN) == 0) {
-                LOG_PRINTF(TRACE, "(Twilio Super SIM)\n");
+                simType = "Twilio Super SIM";
             } else if (strncmp(iccid, ICCID_SKYLO_PREFIX, ICCID_PREFIX_LEN) == 0) {
-                LOG_PRINTF(TRACE, "(Skylo SIM)\n");
+                simType = "Skylo SIM";
             } else {
-                LOG_PRINTF(TRACE, "(Unknown)\n");
+                simType = "Unknown";
             }
+            Log.info("ICCID currently active: %s (%s)", iccid, simType);
         }
     }
 
@@ -258,16 +259,16 @@ int ModemManager::csimCommand(unsigned int timeoutMs, const char* format, ...) {
 
 int ModemManager::openSimChannel() {
     // MANAGE CHANNEL (open) then SELECT the ISD-R applet on logical channel 01.
-    int r = csimCommand(10000, "AT+CSIM=10,\"0070000000\"\r\n");
+    int r = csimCommand(10000, "AT+CSIM=10,\"0070000000\"");
     if (r != RESP_OK) {
         return r;
     }
-    return csimCommand(10000, "AT+CSIM=42,\"01A4040410A0000005591010FFFFFFFF8900000100\"\r\n");
+    return csimCommand(10000, "AT+CSIM=42,\"01A4040410A0000005591010FFFFFFFF8900000100\"");
 }
 
 int ModemManager::closeSimChannel() {
     // MANAGE CHANNEL (close) logical channel 01.
-    return csimCommand(10000, "AT+CSIM=10,\"0070800100\"\r\n");
+    return csimCommand(10000, "AT+CSIM=10,\"0070800100\"");
 }
 
 int ModemManager::storeProfileState(int type, const char* iccidNibbleSwapped, bool refresh) {
@@ -277,12 +278,12 @@ int ModemManager::storeProfileState(int type, const char* iccidNibbleSwapped, bo
     // refresh after all profile changes.
     //   AT+CSIM=50,"81E2910014BF3<1|2>11A00F5A0A<iccid>8101<refresh>"
     int r = csimCommand(10000,
-            "AT+CSIM=50,\"81E2910014BF3%c11A00F5A0A%s8101%02X\"\r\n",
+            "AT+CSIM=50,\"81E2910014BF3%c11A00F5A0A%s8101%02X\"",
             type == ICCID_ENABLE ? '1' : '2',
             iccidNibbleSwapped,
             refresh ? 0x01 : 0x00);
     delay(1000); // allow the eUICC to process before GET RESPONSE
-    csimCommand(10000, "AT+CSIM=10,\"81C0000006\"\r\n"); // GET RESPONSE
+    csimCommand(10000, "AT+CSIM=10,\"81C0000006\""); // GET RESPONSE
     return r;
 }
 
@@ -290,12 +291,12 @@ int ModemManager::refreshModem(int radioType) {
     // Single modem power cycle so it re-reads the now-active eUICC profile.
     // Sets iotopmode while powered down, unless RADIO_UNKNOWN was specified.
     Log.info("Toggling modem power to refresh SIM info...");
-    Cellular.command(180000, "AT+CFUN=0\r\n");
+    Cellular.command(180000, "AT+CFUN=0");
     waitAtResponse(10);
     if (radioType != RADIO_UNKNOWN) {
-        Cellular.command(2000, "AT+QCFG=\"iotopmode\",%d,1\r\n", radioType == RADIO_CELLULAR ? 0 : 3);
+        Cellular.command(2000, "AT+QCFG=\"iotopmode\",%d,1", radioType == RADIO_CELLULAR ? 0 : 3);
     }
-    Cellular.command(180000, "AT+CFUN=1\r\n");
+    Cellular.command(180000, "AT+CFUN=1");
     waitAtResponse(10);
     return 0;
 }
@@ -313,9 +314,9 @@ bool ModemManager::verifyActiveIccid(const char* expectedIccid, unsigned int tri
 
 bool ModemManager::profileExists(const char* targetIccid) {
     // QUERY ALL PROFILES and check the target ICCID is present.
-    Cellular.command(10000, "AT+CSIM=42,\"01A4040410A0000005591010FFFFFFFF8900000100\"\r\n");  // returns +CSIM: 4,"6121"
+    Cellular.command(10000, "AT+CSIM=42,\"01A4040410A0000005591010FFFFFFFF8900000100\"");  // returns +CSIM: 4,"6121"
     int profileSize = 0;
-    Cellular.command(cbCSIMint, &profileSize, 10000, "AT+CSIM=28,\"81E2910009BF2D065C045A9F7092\"\r\n"); // returns +CSIM: 4,"614E"
+    Cellular.command(cbCSIMint, &profileSize, 10000, "AT+CSIM=28,\"81E2910009BF2D065C045A9F7092\""); // returns +CSIM: 4,"614E"
     if (profileSize <= 0) {
         return false;
     }
@@ -350,17 +351,14 @@ int ModemManager::enableDisableProfile(int type, char* specifiedIccid, int radio
 
     // Make sure the modem is powered so we can talk to the eUICC.
     int cfunVal = -1;
-    Cellular.command(cbCFUN, &cfunVal, 10000, "AT+CFUN?\r\n");
+    Cellular.command(cbCFUN, &cfunVal, 10000, "AT+CFUN?");
     if (cfunVal != 1) {
         Cellular.command(10000, "AT+CFUN=1");
         delay(5000);
     }
 
-    // If iotopmode is already correct for the target radio, skip setting it
-    // during the refresh below (saves nothing on its own but avoids a needless
-    // reconfigure).
     int iotopmodeVal = -1;
-    Cellular.command(cbIOTOPMODE, &iotopmodeVal, 10000, "AT+QCFG=\"iotopmode\"\r\n");
+    Cellular.command(cbIOTOPMODE, &iotopmodeVal, 10000, "AT+QCFG=\"iotopmode\"");
     if ((radioType == RADIO_CELLULAR && iotopmodeVal == 0) ||
             (radioType == RADIO_SATELLITE && iotopmodeVal == 3)) {
         radioType = RADIO_UNKNOWN;
@@ -457,7 +455,7 @@ int ModemManager::esimProfiles(char* specifiedIccid, char* profilesBuffer, int p
     }
 
     int cfunVal = -1;
-    Cellular.command(cbCFUN, &cfunVal, 10000, "AT+CFUN?\r\n");
+    Cellular.command(cbCFUN, &cfunVal, 10000, "AT+CFUN?");
     if (cfunVal != 1) {
         Cellular.command(10000, "AT+CFUN=1");
         delay(5000);
@@ -467,9 +465,9 @@ int ModemManager::esimProfiles(char* specifiedIccid, char* profilesBuffer, int p
     getICCID(iccid, /* log results */ false);
 
     // QUERY ALL PROFILES
-    Cellular.command(10000, "AT+CSIM=42,\"01A4040410A0000005591010FFFFFFFF8900000100\"\r\n");  // returns +CSIM: 4,"6121"
+    Cellular.command(10000, "AT+CSIM=42,\"01A4040410A0000005591010FFFFFFFF8900000100\"");  // returns +CSIM: 4,"6121"
     int profileSize = 0;
-    Cellular.command(cbCSIMint, &profileSize, 10000, "AT+CSIM=28,\"81E2910009BF2D065C045A9F7092\"\r\n"); // returns +CSIM: 4,"614E"
+    Cellular.command(cbCSIMint, &profileSize, 10000, "AT+CSIM=28,\"81E2910009BF2D065C045A9F7092\""); // returns +CSIM: 4,"614E"
     int iccidsFound = 0;
     char iccidList[ICCID_RESULTS_MAX][ICCID_LEN + 1];
     if (profileSize > 0) {
@@ -494,16 +492,10 @@ int ModemManager::esimProfiles(char* specifiedIccid, char* profilesBuffer, int p
                 char temp[40] = {0};
                 sprintf(temp, "[%s, %s]", iccidList[i], strcmp(iccid, iccidList[i])==0 ? "enabled" : "disabled");
                 if (!silent) {
-                    // printf("%s", temp);
+                    Log.info("%s", temp);
                     strcat(temp_profiles, temp);
-                }
-                // if (strcmp(iccidList[i], ICCID_KIGEN_TEST) == 0) {
-                //     printf(" (Kigen Test Profile)");
-                // }
-                if (i+1 != iccidsFound) {
-                    if (!silent) {
-                        // printf("\n");
-                        strcat(temp_profiles, "\n");
+                    if (i+1 != iccidsFound) {
+                        strcat(temp_profiles, " ");
                     }
                 }
                 if (silent) {
@@ -516,7 +508,6 @@ int ModemManager::esimProfiles(char* specifiedIccid, char* profilesBuffer, int p
                 }
             }
             if (!silent) {
-                Log.info("\n%s", temp_profiles);
                 if (profilesBuffer && ((int)strlen(temp_profiles) < profilesBufferLen)) {
                     strncpy(profilesBuffer, temp_profiles, profilesBufferLen);
                 }
@@ -605,15 +596,12 @@ int ModemManager::radioEnable(radio_type_t radioType) {
         return SYSTEM_ERROR_NOT_FOUND;
     }
 
-    // We just took specifiedIccid from the live profile list, so skip the
-    // redundant profile re-query inside enableDisableProfile.
     int r = enableDisableProfile(ICCID_ENABLE, specifiedIccid, radioType, /* validateExists */ false);
     if (r == ENABLE_DISABLE_SUCCESS || r == ENABLE_DISABLE_ICCID_IS_ACTIVE) {
         cachedRadioType_ = radioType;
         return SYSTEM_ERROR_NONE;
     }
 
-    // Switch failed/unverified - don't lie to the caller about the active radio.
     Log.error("radioEnable(%d) failed: enableDisableProfile returned %d", radioType, r);
     cachedRadioType_ = RADIO_UNKNOWN;
     return SYSTEM_ERROR_NOT_ALLOWED;
@@ -622,7 +610,7 @@ int ModemManager::radioEnable(radio_type_t radioType) {
 int ModemManager::waitAtResponse(unsigned int tries, unsigned int timeout) {
     unsigned int attempt = 0;
     for (;;) {
-        const int r = Cellular.command(timeout, "AT\r\n");
+        const int r = Cellular.command(timeout, "AT");
         if (r < 0 && r != SYSTEM_ERROR_TIMEOUT) {
             return r;
         }
@@ -649,7 +637,6 @@ int ModemManager::begin() {
 
     waitAtResponse(5); // Check if the module is alive
 
-    Cellular.command(2000, "AT+QGMR\r\n");
     Cellular.command(2000, "AT+QGMR");
 
     return 0;

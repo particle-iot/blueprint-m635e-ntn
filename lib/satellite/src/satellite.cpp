@@ -208,7 +208,7 @@ int Satellite::cbQGPSLOC(int type, const char* buf, int len, GnssPositioningInfo
 int Satellite::getICCID(char* i, bool log) {
     char iccid[30] = {0};
 
-    int ret = Cellular.command(cbICCID, iccid, 10000, "AT+QCCID\r\n");
+    int ret = Cellular.command(cbICCID, iccid, 10000, "AT+QCCID");
     if ((ret == RESP_OK) && (strcmp(iccid, "") != 0)) {
         // Log.info("SIM ICCID = %s", iccid);
     } else {
@@ -223,8 +223,8 @@ int Satellite::getICCID(char* i, bool log) {
 int Satellite::isRegistered() {
     int reg = 0;
     char network[32] = "";
-    Cellular.command(2000, "AT+CEREG?\r\n");
-    if ((RESP_OK == Cellular.command(cbCOPS, network, 10000, "AT+COPS?\r\n"))
+    Cellular.command(2000, "AT+CEREG?");
+    if ((RESP_OK == Cellular.command(cbCOPS, network, 10000, "AT+COPS?"))
             && (strcmp(network,"") != 0))
     {
         Log.info("SATELLITE NETWORK REGISTERED = %s\r\n", network);
@@ -243,7 +243,7 @@ int Satellite::isRegistered() {
 int Satellite::waitAtResponse(unsigned int tries, unsigned int timeout) {
     unsigned int attempt = 0;
     for (;;) {
-        const int r = Cellular.command(timeout, "AT\r\n");
+        const int r = Cellular.command(timeout, "AT");
         if (r < 0 && r != SYSTEM_ERROR_TIMEOUT) {
             return r;
         }
@@ -286,16 +286,15 @@ int Satellite::begin() { // (const SatelliteConfig& conf) {
 
     waitAtResponse(10); // Check if the module is alive
 
-    Cellular.command(2000, "AT+QGMR\r\n");
+    Cellular.command(2000, "AT+QGMR");
 
     char iccid[32] = "";
     getICCID(iccid, /* log results */ true);
 
-    Cellular.command(2000, "AT+QCFG=\"band\"\r\n");
-    Cellular.command(2000, "AT+CEREG=2\r\n");
-    Cellular.command(2000, "AT+CEREG?\r\n");
-    Cellular.command(2000, "AT+COPS=3,0\r\n");
-    // 0000139019 [ncp.at] TRACE: < +QGPSLOC: 181642.000,3804.3821N,12209.9418W,2.0,95.4,3,0.00,0.0,0.0,070526,03
+    Cellular.command(2000, "AT+QCFG=\"band\"");
+    Cellular.command(2000, "AT+CEREG=2");
+    Cellular.command(2000, "AT+CEREG?");
+    Cellular.command(2000, "AT+COPS=3,0");
 
     // Program the NTN location fix before registration. Skylo NTN attach
     // requires a location; set it here (from a GPS fix or fixed fallback
@@ -316,11 +315,11 @@ int Satellite::begin() { // (const SatelliteConfig& conf) {
             "\"AT+QCFG=\"iotopmode\",3,1\n"
             "\"AT+CFUN=1\n");
     } else {
-        Cellular.command(180000, "AT+CFUN=0\r\n");
+        Cellular.command(180000, "AT+CFUN=0");
         Cellular.command(2000, "AT+CGDCONT=1,\"IP\",\"360Connect\"");
-        Cellular.command(2000, "AT+QCFG=\"nwscanmode\",3,1\r\n"); // LTE (includes NTN)
-        Cellular.command(2000, "AT+QCFG=\"iotopmode\",3,1\r\n");  // NTN only
-        Cellular.command(180000, "AT+CFUN=1\r\n");
+        Cellular.command(2000, "AT+QCFG=\"nwscanmode\",3,1"); // LTE (includes NTN)
+        Cellular.command(2000, "AT+QCFG=\"iotopmode\",3,1");  // NTN only
+        Cellular.command(180000, "AT+CFUN=1");
     }
 
     Log.trace("Initializing protocol handler");
@@ -354,16 +353,16 @@ int Satellite::connectImpl() {
     if (millis() - lastConnectAttempt > 5000) {
         if (!ntnConnected) {
             if (isRegistered()) {
-                Cellular.command(2000, "AT+CEREG?\r\n");
+                Cellular.command(2000, "AT+CEREG?");
                 int r = 0;
 
 #if USE_NON_IP
-                r = Cellular.command(2000, "AT+QCFGEXT=\"nipdcfg\",0,\"particle.io\"\r\n");
+                r = Cellular.command(2000, "AT+QCFGEXT=\"nipdcfg\",0,\"particle.io\"");
                 if (r == RESP_OK) {
-                    r = Cellular.command(2000, "AT+QCFGEXT=\"nipdcfg\"\r\n");
+                    r = Cellular.command(2000, "AT+QCFGEXT=\"nipdcfg\"");
                 }
                 if (r == RESP_OK) {
-                    r = Cellular.command(2000, "AT+QCFGEXT=\"nipd\",1,30\r\n");
+                    r = Cellular.command(2000, "AT+QCFGEXT=\"nipd\",1,30");
                     ntnConnected = 1;
                 } else {
                     ntnConnected = 0;
@@ -393,8 +392,8 @@ int Satellite::connectImpl() {
                 // Toggle CFUN if no registration for a long time
                 if (millis() - noRegistrationTimer_ > SATELLITE_NCP_NO_REGISTRATION_MS) {
                     Log.info("No registration for %d minutes, toggling CFUN.", SATELLITE_NCP_NO_REGISTRATION_MS/60000);
-                    Cellular.command(20000, "AT+CFUN=0\r\n");
-                    Cellular.command(20000, "AT+CFUN=1\r\n");
+                    Cellular.command(20000, "AT+CFUN=0");
+                    Cellular.command(20000, "AT+CFUN=1");
                     noRegistrationTimer_ = millis();
                 }
             }
@@ -461,7 +460,7 @@ void Satellite::receiveData(void) {
         int atResponse = 0;
 
 #if USE_NON_IP
-        atResponse = Cellular.command(cbQCFGEXTquery, &recv, 10000, "AT+QCFGEXT=\"nipdr\",0\r\n");
+        atResponse = Cellular.command(cbQCFGEXTquery, &recv, 10000, "AT+QCFGEXT=\"nipdr\",0");
 #else 
         Cellular.command(2000, "AT+QISTATE?");
         atResponse = Cellular.command(cbQIRDquery, &recv, 60 * 1000, "AT+QIRD=0,0");
@@ -469,7 +468,7 @@ void Satellite::receiveData(void) {
         if ((RESP_OK == atResponse) && (recv > 0))
         {
 #if USE_NON_IP
-            atResponse = Cellular.command(cbQCFGEXTread, rxData, 10000, "AT+QCFGEXT=\"nipdr\",%d,1\r\n", recv);
+            atResponse = Cellular.command(cbQCFGEXTread, rxData, 10000, "AT+QCFGEXT=\"nipdr\",%d,1", recv);
 #else 
             atResponse = Cellular.command(cbQIRD, rxData, 10000, "AT+QIRD=0,%d", recv);
 #endif
@@ -508,7 +507,7 @@ int Satellite::tx(const uint8_t* buf, size_t len, int port) {
 
 
 #if USE_NON_IP
-    auto r = Cellular.command(2000, "AT+QCFGEXT=\"nipds\",1,\"%s\",%d\r\n", hexBuf.get(), len);
+    auto r = Cellular.command(2000, "AT+QCFGEXT=\"nipds\",1,\"%s\",%d", hexBuf.get(), len);
 #else
     int dummy;
     auto r = Cellular.command(2000, "AT+QISENDEX=0,\"test\",0"); // TODO: FIX THIS
@@ -529,11 +528,11 @@ int Satellite::tx(const uint8_t* buf, size_t len, int port) {
 int Satellite::getGNSSLocation(unsigned int maxFixWaitTimeMs) {
     GnssPositioningInfo info = {};
     auto s = millis();
-    Cellular.command(2000, "AT+QGPS=1\r\n");
+    Cellular.command(2000, "AT+QGPS=1");
     delay(5000);
 
     do {
-        Cellular.command(cbQGPSLOC, &info, 2000, "AT+QGPSLOC=2\r\n");
+        Cellular.command(cbQGPSLOC, &info, 2000, "AT+QGPSLOC=2");
 
         if (info.valid) {
             Log.info("GPS TIME: %02d/%02d/%02d %02d:%02d:%02d", info.utcTime.tm_year, info.utcTime.tm_mon,
@@ -545,7 +544,7 @@ int Satellite::getGNSSLocation(unsigned int maxFixWaitTimeMs) {
         }
     } while (!info.valid && millis() - s < maxFixWaitTimeMs);
 
-    Cellular.command(2000, "AT+QGPSEND\r\n");
+    Cellular.command(2000, "AT+QGPSEND");
 
     if (info.valid) {
         lastPositionInfo_ = info;
@@ -606,8 +605,8 @@ int Satellite::processErrors() {
     if (errorCount_ >= SATELLITE_NCP_COMM_ERRORS_MAX) {
         Log.error("%d errors, resetting modem!", SATELLITE_NCP_COMM_ERRORS_MAX);
         // reset modem and re-init
-        Cellular.command(20000, "AT+CFUN=0\r\n");
-        Cellular.command(20000, "AT+CFUN=1\r\n");
+        Cellular.command(20000, "AT+CFUN=0");
+        Cellular.command(20000, "AT+CFUN=1");
         errorCount_ = 0;
         registrationUpdateMs_ = SATELLITE_NCP_REGISTRATION_UPDATE_FAST_MS;
         registered_ = 1;

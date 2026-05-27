@@ -18,7 +18,7 @@
 #include "Particle.h"
 #include "satellite.h"
 #include "modem_manager.h"
-#include "config.h"
+#include "app_config.h"
 
 SYSTEM_MODE(SEMI_AUTOMATIC);
 
@@ -118,30 +118,21 @@ bool satelliteShouldSwitchToCellular() {
 #endif
 }
 
-// Acquire the location to program into the modem's NTN location fix, per the
-// configured LOC_SOURCE, then hand it to the satellite library. Called once on
-// entry to NTN (not on every publish).
+// Acquire the location to program into the modem's NTN location fix, then hand
+// it to the satellite library. 
 void acquireAndSetLocationFix() {
     double lat = LOC_FIXED_LATITUDE;
     double lon = LOC_FIXED_LONGITUDE;
     double alt = LOC_FIXED_ALTITUDE;
-    bool haveFix = false;
 
-#if LOC_SOURCE == LOC_SOURCE_GPS_FIXED_FALLBACK
-    Log.info("Acquiring GPS fix (timeout %lu ms)...", (unsigned long)LOC_GPS_FIX_TIMEOUT_MS);
     if (satellite.getGNSSLocation(LOC_GPS_FIX_TIMEOUT_MS) == 0) {
         auto p = satellite.lastPositionInfo();
         lat = p.latitude;
         lon = p.longitude;
         alt = p.altitude;
-        haveFix = true;
-        Log.info("Using GPS fix for NTN location");
     } else {
-        Log.warn("GPS fix not acquired; using fixed fallback location");
+        Log.warn("No GNSS fix; using fixed fallback location");
     }
-#else
-    Log.info("Using fixed location for NTN");
-#endif
 
     pubLat = lat;
     pubLon = lon;

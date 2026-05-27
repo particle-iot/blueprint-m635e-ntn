@@ -104,19 +104,23 @@
 // NTN attach requires a location. The device sets it on the modem via
 // AT+QNWCFG="ntn_locfix",... before registration.
 //
-// LOC_SOURCE selects where that location comes from:
-//   LOC_SOURCE_FIXED              : always use the fixed coordinates below.
-//   LOC_SOURCE_GPS_FIXED_FALLBACK : try a GPS fix first (up to
-//                                   LOC_GPS_FIX_TIMEOUT_MS); if none, fall back
-//                                   to the fixed coordinates below.
+// LOC_SOURCE selects where that location comes from. Choose based on whether
+// the use case has a GNSS antenna:
+//   LOC_SOURCE_FIXED   : no GNSS antenna - always use the fixed coordinates
+//                        below; the GNSS engine is never queried.
+//   LOC_SOURCE_DYNAMIC : GNSS antenna present - query the GNSS engine for a
+//                        live fix (up to LOC_GPS_FIX_TIMEOUT_MS). If no fix is
+//                        obtained, the application falls back to the fixed
+//                        coordinates below so NTN attach can still proceed.
 #define LOC_SOURCE_FIXED                    0
-#define LOC_SOURCE_GPS_FIXED_FALLBACK       1
-#define LOC_SOURCE                          LOC_SOURCE_GPS_FIXED_FALLBACK
+#define LOC_SOURCE_DYNAMIC                  1
+#define LOC_SOURCE                          LOC_SOURCE_FIXED
 
-// Abandon the GPS fix attempt after this long and use the fixed fallback.
+// Abandon a dynamic GNSS fix attempt after this long (LOC_SOURCE_DYNAMIC only).
 #define LOC_GPS_FIX_TIMEOUT_MS              (60UL * 1000)
 
-// Fixed fallback coordinates (decimal degrees / metres).
+// Fixed coordinates (decimal degrees / metres). Used as the location in
+// LOC_SOURCE_FIXED, and as the fallback in LOC_SOURCE_DYNAMIC.
 #define LOC_FIXED_LATITUDE                  (38.07315)
 #define LOC_FIXED_LONGITUDE                 (-122.16545)
 #define LOC_FIXED_ALTITUDE                  (111.8)

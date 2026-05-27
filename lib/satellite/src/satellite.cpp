@@ -16,6 +16,7 @@
  */
 
 #include "satellite.h"
+#include "app_config.h"
 
 #include "logging.h"
 LOG_SOURCE_CATEGORY("ncp.client");
@@ -526,6 +527,19 @@ int Satellite::tx(const uint8_t* buf, size_t len, int port) {
 }
 
 int Satellite::getGNSSLocation(unsigned int maxFixWaitTimeMs) {
+#if LOC_SOURCE == LOC_SOURCE_FIXED
+    // No GNSS antenna: use the fixed coordinates from config without querying
+    // the GNSS engine.
+    (void)maxFixWaitTimeMs;
+    GnssPositioningInfo info = {};
+    info.latitude = LOC_FIXED_LATITUDE;
+    info.longitude = LOC_FIXED_LONGITUDE;
+    info.altitude = LOC_FIXED_ALTITUDE;
+    info.valid = 1;
+    lastPositionInfo_ = info;
+    Log.info("Using fixed location: %.5lf, %.5lf, ALT:%.1f", info.latitude, info.longitude, info.altitude);
+    return 0;
+#else
     GnssPositioningInfo info = {};
     auto s = millis();
     Cellular.command(2000, "AT+QGPS=1");
@@ -550,6 +564,7 @@ int Satellite::getGNSSLocation(unsigned int maxFixWaitTimeMs) {
         lastPositionInfo_ = info;
     }
     return info.valid == 1 ? 0 : -1;
+#endif // LOC_SOURCE
 }
 
 int Satellite::setLocationFix(double lat, double lon, double alt) {

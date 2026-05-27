@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024 Particle Industries, Inc.  All rights reserved.
+ * Copyright (c) 2026 Particle Industries, Inc.  All rights reserved.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -37,6 +37,7 @@ typedef enum {
     ENABLE_DISABLE_ICCID_DOES_NOT_EXIST            = 2,
     ENABLE_DISABLE_ICCID_NOT_ACTIVE                = 3,
     ENABLE_DISABLE_ICCID_IS_ACTIVE                 = 4,
+    ENABLE_DISABLE_VERIFY_FAILED                   = 5,
 } enable_disable_error_t;
 
 class ModemManager {
@@ -69,10 +70,20 @@ private:
     void swapNibbles(const char* input, char* output);
     int isValidHexString(const char *str, int length);
     void stripTrailingF(char* iccid);
+    void padIccidF(char* iccid);
     int findIccids(const char *input, char results[][ICCID_LEN + 1], bool includeTestProfile);
     int getICCID(char* i, bool log);
-    void enableDisableICCID(int type, char* specifiedIccid, int radioType);
-    int enableDisableProfile(int type, char* specifiedIccid, int radioType);
+
+    // Low-level eUICC (ES10) helpers, composed by enableDisableProfile().
+    int csimCommand(unsigned int timeoutMs, const char* format, ...);
+    int openSimChannel();                                                  // MANAGE CHANNEL open + SELECT ISD-R
+    int closeSimChannel();                                                 // MANAGE CHANNEL close
+    int storeProfileState(int type, const char* iccidNibbleSwapped, bool refresh); // ES10c Enable/Disable APDU (no CFUN)
+    int refreshModem(int radioType);                                       // single CFUN cycle (+ iotopmode)
+    bool verifyActiveIccid(const char* expectedIccid, unsigned int tries);
+    bool profileExists(const char* targetIccid);
+
+    int enableDisableProfile(int type, char* specifiedIccid, int radioType, bool validateExists = true);
     int findIccidByType(const char* inputBuffer, int inputBufferLen, char* matchedIccid, int radioType);
     void updateCachedRadioType(char* iccid);
 

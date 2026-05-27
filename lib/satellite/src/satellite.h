@@ -125,7 +125,6 @@ private:
     char publishBuffer[1024] = {};
 
     static int cbCFUN(int type, const char* buf, int len, int* cfun);
-    static int cbICCID(int type, const char* buf, int len, char* iccid);
     static int cbCOPS(int type, const char* buf, int len, char* network);
     static int cbQCFGEXTquery(int type, const char* buf, int len, int* rxlen);
     static int cbQIRDquery(int type, const char* buf, int len, int* rxlen);
@@ -142,7 +141,6 @@ private:
     void receiveData(void);
     int processErrors(void);
     int connectImpl(void);
-    int getICCID(char* i, bool log);
 };
 
 } // particle

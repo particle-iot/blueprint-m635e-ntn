@@ -121,15 +121,6 @@ int Satellite::cbCFUN(int type, const char* buf, int len, int* cfun)
     return WAIT;
 }
 
-int Satellite::cbICCID(int type, const char* buf, int len, char* iccid)
-{
-    if ((type == TYPE_PLUS) && iccid) {
-        if (sscanf(buf, "\r\n+QCCID: %[^\r]\r\n", iccid) == 1)
-            /*nothing*/;
-    }
-    return WAIT;
-}
-
 int Satellite::cbCOPS(int type, const char* buf, int len, char* network)
 {
     if ((type == TYPE_PLUS) && network) {
@@ -206,21 +197,6 @@ int Satellite::cbQGPSLOC(int type, const char* buf, int len, GnssPositioningInfo
     return WAIT;
 }
 
-int Satellite::getICCID(char* i, bool log) {
-    char iccid[30] = {0};
-
-    int ret = Cellular.command(cbICCID, iccid, 10000, "AT+QCCID");
-    if ((ret == RESP_OK) && (strcmp(iccid, "") != 0)) {
-        // Log.info("SIM ICCID = %s", iccid);
-    } else {
-        Log.info("SIM ICCID NOT FOUND!");
-        return -1;
-    }
-
-    strcpy(i, iccid);
-    return 0;
-}
-
 int Satellite::isRegistered() {
     int reg = 0;
     char network[32] = "";
@@ -288,9 +264,6 @@ int Satellite::begin() { // (const SatelliteConfig& conf) {
     waitAtResponse(10); // Check if the module is alive
 
     Cellular.command(2000, "AT+QGMR");
-
-    char iccid[32] = "";
-    getICCID(iccid, /* log results */ true);
 
     Cellular.command(2000, "AT+QCFG=\"band\"");
     Cellular.command(2000, "AT+CEREG=2");

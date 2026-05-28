@@ -16,7 +16,6 @@
  */
 
 #include "satellite.h"
-#include "app_config.h"
 
 #include "logging.h"
 LOG_SOURCE_CATEGORY("ncp.client");
@@ -91,14 +90,6 @@ namespace {
 
 #define SATELLITE_NCP_COPS_TIMEOUT_MS (180000)
 
-bool celullarNotReady() {
-    return !Cellular.ready();
-}
-
-bool wifiNotReady() {
-    return !WiFi.ready();
-}
-
 } // namespace annonymous
 
 Satellite::Satellite() : begun_(false), registrationUpdateMs_(SATELLITE_NCP_REGISTRATION_UPDATE_FAST_MS)
@@ -141,7 +132,7 @@ int Satellite::cbQCFGEXTquery(int type, const char* buf, int len, int* rxlen)
 
 int Satellite::cbQIRDquery(int type, const char* buf, int len, int* rxlen)
 {
-    Log.info("%s", buf);
+    // Log.trace("%s", buf);
     //+QIRD: <total_receive_length>,<have_read_length>,<unread_length>
     if (rxlen) {
         auto ret = sscanf(buf, "\r\n+QIRD: %*d,%*d,%d\r\n", rxlen);
@@ -151,7 +142,7 @@ int Satellite::cbQIRDquery(int type, const char* buf, int len, int* rxlen)
 }
 
 int Satellite::cbQIRD(int type, const char* buf, int len, char* outBuf) {
-  // Log.info("%s", buf);
+  // Log.trace("%s", buf);
   static int incomingPacketLength = 0;
   if (incomingPacketLength == 0) {
     auto ret = sscanf(buf, "\r\n+QIRD: %d\r\n", &incomingPacketLength);
@@ -256,7 +247,7 @@ int Satellite::begin() { // (const SatelliteConfig& conf) {
 
         // If disconnected from the cloud but cellular still connected, disconnect.
         Cellular.disconnect();
-        if (!waitFor(celullarNotReady, 60000)) {
+        if (waitForNot(Cellular.ready, 60000)) {
             return SYSTEM_ERROR_TIMEOUT;
         }
     }
@@ -450,8 +441,6 @@ void Satellite::receiveData(void) {
             if ((RESP_OK == atResponse) && (strcmp(rxData,"") != 0))
             {
                 Log.info("%d BYTES RECEIVED!", recv);
-                // General counter response - 806006
-                // Diagnostics request - 830000120306071A
                 auto dataBuf = util::Buffer(recv);
                 hexToBytes(rxData, dataBuf.data(), recv);
                 LOG_DUMP(TRACE, dataBuf.data(), recv);
@@ -469,17 +458,15 @@ int Satellite::tx(const uint8_t* buf, size_t len, int port) {
         return SYSTEM_ERROR_INVALID_STATE;
     }
 
-    auto hexBufSize = len * 2 + 1; // Includes term. null
+    auto hexBufSize = len * 2 + 1;
     std::unique_ptr<char[]> hexBuf(new(std::nothrow) char[hexBufSize]);
     if (!hexBuf) {
         return SYSTEM_ERROR_NO_MEMORY;
     }
     memset(hexBuf.get(), 0, hexBufSize);
     auto hexLength = toHex(buf, len, hexBuf.get(), hexBufSize);
-    Log.info("TX %d->%d bytes: %s", len, hexLength, hexBuf.get());
-    Log.info("bytes: %s", hexBuf.get()[130]);
-
-
+    Log.info("TX %d->%d bytes", len, hexLength);
+    Log.trace("%s", (char*)hexBuf.get());
 #if USE_NON_IP
     auto r = Cellular.command(2000, "AT+QCFGEXT=\"nipds\",1,\"%s\",%d", hexBuf.get(), len);
 #else
@@ -500,19 +487,20 @@ int Satellite::tx(const uint8_t* buf, size_t len, int port) {
 }
 
 int Satellite::getGNSSLocation(unsigned int maxFixWaitTimeMs) {
-#if LOC_SOURCE == LOC_SOURCE_FIXED
-    // No GNSS antenna: use the fixed coordinates from config without querying
-    // the GNSS engine.
-    (void)maxFixWaitTimeMs;
-    GnssPositioningInfo info = {};
-    info.latitude = LOC_FIXED_LATITUDE;
-    info.longitude = LOC_FIXED_LONGITUDE;
-    info.altitude = LOC_FIXED_ALTITUDE;
-    info.valid = 1;
-    lastPositionInfo_ = info;
-    Log.info("Using fixed location: %.5lf, %.5lf, ALT:%.1f", info.latitude, info.longitude, info.altitude);
-    return 0;
-#else
+    // No GNSS antenna mode: return the coordinates supplied via setLocationFix()
+    // without ever touching the GNSS engine.
+    if (locForceFixed_ && locFixValid_) {
+        (void)maxFixWaitTimeMs;
+        GnssPositioningInfo info = {};
+        info.latitude  = locLat_;
+        info.longitude = locLon_;
+        info.altitude  = locAlt_;
+        info.valid = 1;
+        lastPositionInfo_ = info;
+        Log.info("Using fixed location: %.5lf, %.5lf, ALT:%.1f", info.latitude, info.longitude, info.altitude);
+        return 0;
+    }
+
     GnssPositioningInfo info = {};
     auto s = millis();
     Cellular.command(2000, "AT+QGPS=1");
@@ -537,15 +525,16 @@ int Satellite::getGNSSLocation(unsigned int maxFixWaitTimeMs) {
         lastPositionInfo_ = info;
     }
     return info.valid == 1 ? 0 : -1;
-#endif // LOC_SOURCE
 }
 
-int Satellite::setLocationFix(double lat, double lon, double alt) {
+int Satellite::setLocationFix(double lat, double lon, double alt, bool forceFixed) {
     locLat_ = lat;
     locLon_ = lon;
     locAlt_ = alt;
     locFixValid_ = true;
-    Log.info("NTN location fix set to %.5lf, %.5lf, ALT:%.1lf", lat, lon, alt);
+    locForceFixed_ = forceFixed;
+    Log.info("NTN location fix set to %.5lf, %.5lf, ALT:%.1lf (forceFixed=%s)",
+        lat, lon, alt, forceFixed ? "true" : "false");
     return 0;
 }
 
@@ -568,23 +557,6 @@ int Satellite::publishLocation() {
             writer.name("alt").value(lastPositionInfo_.altitude);
         writer.endObject();
     writer.endObject();
-
-    WiFi.on();
-    waitUntil(WiFi.isOn);
-    WiFi.connect();
-    if (waitFor(WiFi.ready, 30000)) {
-        Particle.connect();
-        waitUntil(Particle.connected);
-
-        Particle.publish("loc", publishBuffer);
-
-        Particle.disconnect();
-        waitUntil(Particle.disconnected);
-        WiFi.disconnect();
-        waitUntil(wifiNotReady);
-        WiFi.off();
-        waitUntil(WiFi.isOff);
-    }
 
     return 0;
 }

@@ -92,7 +92,11 @@ public:
     // Stores the coordinates so begin() can program them into the modem before
     // NTN registration. Must be called before begin() to take effect on the
     // next registration.
-    int setLocationFix(double lat, double lon, double alt);
+    //
+    // forceFixed: when true, getGNSSLocation() short-circuits to these stored
+    // coordinates and never queries the modem's GNSS engine. Use this when the
+    // device has no GNSS antenna and the app is supplying a static location.
+    int setLocationFix(double lat, double lon, double alt, bool forceFixed = false);
 
     int process(bool force = false);
 
@@ -120,6 +124,9 @@ private:
     double locLon_ = 0;
     double locAlt_ = 0;
     bool locFixValid_ = false;
+    // When true, getGNSSLocation() returns the stored loc{Lat,Lon,Alt}_ without
+    // querying the GNSS engine. Set via setLocationFix(forceFixed=true).
+    bool locForceFixed_ = false;
     constrained::CloudProtocol proto_;
 
     char publishBuffer[1024] = {};

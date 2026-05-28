@@ -93,52 +93,58 @@ bool onEntry() {
 }
 
 // Should we leave Cellular for Satellite? Driven by the disconnect timer (or the
-// force flag for bench testing). Never true if NTN is disabled.
+// force flag for bench testing). Never true if NTN is disabled in config.
 bool cellularShouldSwitchToSatellite() {
-#if !FEATURE_NTN_ENABLED
-    return false;
-#elif FORCE_CELLULAR_TO_SATELLITE_SWITCH
-    return radioTime && (millis() - radioTime > FORCE_C2S_SWITCH_TIMEOUT_MS);
-#else
-    return disconnectedStartTime && (millis() - disconnectedStartTime > CELLULAR_DISCONNECTED_TIMEOUT_MS);
-#endif
+    if (!g_cfg.ntnEnabled) {
+        return false;
+    }
+    if (g_cfg.forceCellularToSatelliteSwitch) {
+        return radioTime && (millis() - radioTime > g_cfg.forceC2sSwitchTimeoutS * 1000UL);
+    }
+    return disconnectedStartTime && (millis() - disconnectedStartTime > g_cfg.cellularDisconnectedTimeoutS * 1000UL);
 }
 
 // Should we leave Satellite for Cellular? We don't camp on Satellite if Cellular
 // might be available - go test it again after the connected/disconnected
-// timeout. Never true if LTE is disabled.
+// timeout. Never true if LTE is disabled in config.
 bool satelliteShouldSwitchToCellular() {
-#if !FEATURE_LTE_ENABLED
-    return false;
-#elif FORCE_SATELLITE_TO_CELLULAR_SWITCH
-    return radioTime && (millis() - radioTime > FORCE_S2C_SWITCH_TIMEOUT_MS);
-#else
-    return (disconnectedStartTime && (millis() - disconnectedStartTime > SATELLITE_DISCONNECTED_TIMEOUT_MS)) ||
-           (connectedStartTime && (millis() - connectedStartTime > SATELLITE_CONNECTED_TIMEOUT_MS));
-#endif
+    if (!g_cfg.lteEnabled) {
+        return false;
+    }
+    if (g_cfg.forceSatelliteToCellularSwitch) {
+        return radioTime && (millis() - radioTime > g_cfg.forceS2cSwitchTimeoutS * 1000UL);
+    }
+    return (disconnectedStartTime && (millis() - disconnectedStartTime > g_cfg.satelliteDisconnectedTimeoutS * 1000UL)) ||
+           (connectedStartTime && (millis() - connectedStartTime > g_cfg.satelliteConnectedTimeoutS * 1000UL));
 }
 
 // Acquire the location to program into the modem's NTN location fix, then hand
-// it to the satellite library. 
+// it to the satellite library. In Fixed mode we never query GNSS - we pass the
+// configured coords through and tell the library to short-circuit any later
+// getGNSSLocation() call (forceFixed=true). In Dynamic mode we try the GNSS
+// engine for up to locGpsFixTimeoutS and fall back to the fixed coords.
 void acquireAndSetLocationFix() {
-    double lat = LOC_FIXED_LATITUDE;
-    double lon = LOC_FIXED_LONGITUDE;
-    double alt = LOC_FIXED_ALTITUDE;
+    double lat = g_cfg.locFixedLatitude;
+    double lon = g_cfg.locFixedLongitude;
+    double alt = g_cfg.locFixedAltitude;
+    const bool forceFixed = (g_cfg.locSource == LocSource::Fixed);
 
-    if (satellite.getGNSSLocation(LOC_GPS_FIX_TIMEOUT_MS) == 0) {
-        auto p = satellite.lastPositionInfo();
-        lat = p.latitude;
-        lon = p.longitude;
-        alt = p.altitude;
-    } else {
-        Log.warn("No GNSS fix; using fixed fallback location");
+    if (!forceFixed) {
+        if (satellite.getGNSSLocation(g_cfg.locGpsFixTimeoutS * 1000UL) == 0) {
+            auto p = satellite.lastPositionInfo();
+            lat = p.latitude;
+            lon = p.longitude;
+            alt = p.altitude;
+        } else {
+            Log.warn("No GNSS fix; using fixed fallback location");
+        }
     }
 
     pubLat = lat;
     pubLon = lon;
     pubAlt = alt;
     havePubLoc = true;
-    satellite.setLocationFix(lat, lon, alt);
+    satellite.setLocationFix(lat, lon, alt, forceFixed);
 }
 
 // Build the location payload and route it to the active publish stack.
@@ -252,6 +258,11 @@ void setup()
     pinMode(D7, OUTPUT);
     digitalWrite(D7, LOW);
 
+    // Load runtime config from the bundled app_config.json asset before
+    // anything else reads g_cfg. Missing/invalid asset falls back to the
+    // compiled defaults in app_config.cpp.
+    loadAppConfig();
+
     modem.begin();
 
     // Hardware is initialised; the Boot state selects and enables the start radio.
@@ -267,23 +278,23 @@ void loop()
         // --------------------------------------------------------------------
         case AppState::Boot:
         {
-#if START_ON_CELLULAR && FEATURE_LTE_ENABLED
-            // Cellular first
-            Log.info("RADIO CELLULAR --------------------");
-            modem.radioEnable(RADIO_CELLULAR);
-            updateConnectionTimers(true /* forced log */);
-            RGB.control(false);
-            Particle.connect();
-            transitionTo(AppState::CellularConnect);
-#else
-            // NTN-first demo: start on Satellite.
-            Log.info("RADIO SATELLITE --------------------");
-            modem.radioEnable(RADIO_SATELLITE);
-            updateConnectionTimers(true /* forced log */);
-            RGB.control(true);
-            RGB.color(0,255,0);
-            transitionTo(AppState::AcquireLocation);
-#endif
+            if (g_cfg.startOnCellular && g_cfg.lteEnabled) {
+                // Cellular first
+                Log.info("RADIO CELLULAR --------------------");
+                modem.radioEnable(RADIO_CELLULAR);
+                updateConnectionTimers(true /* forced log */);
+                RGB.control(false);
+                Particle.connect();
+                transitionTo(AppState::CellularConnect);
+            } else {
+                // NTN-first demo: start on Satellite.
+                Log.info("RADIO SATELLITE --------------------");
+                modem.radioEnable(RADIO_SATELLITE);
+                updateConnectionTimers(true /* forced log */);
+                RGB.control(true);
+                RGB.color(0,255,0);
+                transitionTo(AppState::AcquireLocation);
+            }
             break;
         }
 
@@ -307,9 +318,9 @@ void loop()
                 transitionTo(AppState::SwitchToSatellite);
                 break;
             }
-            if (Particle.connected() && (millis() - lastPublish > LTE_PUBLISH_INTERVAL_MS)) {
+            if (Particle.connected() && (millis() - lastPublish > g_cfg.ltePublishIntervalS * 1000UL)) {
                 // Refresh location for the LTE publish where a fix is available.
-                if (satellite.getGNSSLocation(LOC_GPS_FIX_TIMEOUT_MS) == 0) {
+                if (satellite.getGNSSLocation(g_cfg.locGpsFixTimeoutS * 1000UL) == 0) {
                     auto p = satellite.lastPositionInfo();
                     pubLat = p.latitude;
                     pubLon = p.longitude;
@@ -372,7 +383,7 @@ void loop()
                 transitionTo(AppState::SwitchToCellular);
                 break;
             }
-            if (satellite.connected() && (millis() - lastPublish > NTN_PUBLISH_INTERVAL_MS)) {
+            if (satellite.connected() && (millis() - lastPublish > g_cfg.ntnPublishIntervalS * 1000UL)) {
                 // Publish using the location cached on NTN entry.
                 publishLocationData();
                 lastPublish = millis();
@@ -408,7 +419,7 @@ void loop()
             Log.info("SWITCH to CELLULAR --------------------");
             // NOTE: Very important to disconnect Satellite before switching to Cellular
             satellite.disconnect();
-            satellite.process(); // process disconnect
+            satellite.process();
             RGB.control(false);
 
             Log.info("RADIO CELLULAR --------------------");
@@ -442,14 +453,3 @@ void loop()
             break;
     }
 }
-
-
-
-
-
-
-
-
-
-
-

@@ -17,110 +17,95 @@
 
 #pragma once
 
+#include "Particle.h"
+
 // =============================================================================
 // M635E NTN Blueprint Demo - Application Configuration
 // =============================================================================
-// Central configuration for the always-on NTN satellite demo. Every value that
-// controls runtime behaviour for the demo lives here so it can be tuned in one
-// place. These are compile-time #defines: change a value, recompile, reflash.
+// Runtime configuration loaded from the bundled Particle Asset
+// `assets/app_config.json`. Call loadAppConfig() once during setup() before any
+// component that reads g_cfg. If the asset is missing or any field is invalid,
+// the defaults defined in src/app_config.cpp are used.
 //
 // Conventions:
-//   *_MS values are milliseconds.
-//   FEATURE_* flags are intended for use with #if so unused code can be
-//   compiled out entirely.
+//   *_S values are seconds. Convert at the call site if a Device OS API needs
+//   milliseconds (e.g. `g_cfg.fooS * 1000UL`).
 // =============================================================================
 
 
-// -----------------------------------------------------------------------------
-// Feature toggles
-// -----------------------------------------------------------------------------
-// Enable / disable each connectivity stack. Use with #if in application code so
-// the unused stack can be excluded from the build.
-//   1 = enabled, 0 = disabled.
-#define FEATURE_LTE_ENABLED                 1
-#define FEATURE_NTN_ENABLED                 1
-
-#if !FEATURE_LTE_ENABLED && !FEATURE_NTN_ENABLED
-#error "At least one of FEATURE_LTE_ENABLED / FEATURE_NTN_ENABLED must be set"
-#endif
+// Where the device sources its NTN location fix.
+//   Fixed   : no GNSS antenna; always use the configured fixed coords. The GNSS
+//             engine is never queried.
+//   Dynamic : GNSS antenna present; try the GNSS engine for up to
+//             locGpsFixTimeoutS. If no fix is obtained the application falls
+//             back to the fixed coords so NTN attach can still proceed.
+enum class LocSource {
+    Fixed   = 0,
+    Dynamic = 1,
+};
 
 
-// -----------------------------------------------------------------------------
-// Startup
-// -----------------------------------------------------------------------------
-// Which radio the device boots on.
-//   1 = boot on Cellular (LTE-M), 0 = boot on Satellite (NTN).
-// NOTE: For a real deployment you would normally start on Cellular 
-// and only fall back to Satellite. Starting on Satellite is
-// useful for NTN-first demos.
-#define START_ON_CELLULAR                   0
+struct AppConfig {
+    // ---- Feature toggles --------------------------------------------------
+    // Enable / disable each connectivity stack at runtime. Both stacks are
+    // always compiled in; these gates short-circuit the corresponding
+    // switch-decision helpers.
+    bool lteEnabled;
+    bool ntnEnabled;
+
+    // ---- Startup ----------------------------------------------------------
+    // true  = boot on Cellular (LTE-M)
+    // false = boot on Satellite (NTN). Useful for NTN-first demos.
+    bool startOnCellular;
+
+    // ---- Publish timing ---------------------------------------------------
+    // Per-stack publish cadence in seconds. Do NOT set the satellite interval
+    // below 10 s.
+    uint32_t ltePublishIntervalS;
+    uint32_t ntnPublishIntervalS;
+
+    // ---- Radio switching timeouts ----------------------------------------
+    // Seconds. It is NOT recommended to set these below 10 minutes (600 s) for
+    // production.
+    //   cellularDisconnectedTimeoutS : time disconnected on LTE before
+    //       switching to Satellite. (There is no cellular "connected" timeout
+    //       - if LTE is connected there is no reason to switch.)
+    //   satelliteConnectedTimeoutS   : time connected on Satellite before
+    //       switching back to test Cellular again.
+    //   satelliteDisconnectedTimeoutS: time disconnected on Satellite before
+    //       switching back to Cellular. Satellite can take a while to connect
+    //       - don't set this too low.
+    uint32_t cellularDisconnectedTimeoutS;
+    uint32_t satelliteConnectedTimeoutS;
+    uint32_t satelliteDisconnectedTimeoutS;
+
+    // ---- Forced switching (testing only) ---------------------------------
+    // Set both force flags to false for normal operation. When true, the
+    // matching c2s/s2c timeout (seconds) drives the switch decision purely on
+    // elapsed time since radio enable, ignoring connection state - useful for
+    // exercising switch logic on the bench.
+    bool forceCellularToSatelliteSwitch;
+    bool forceSatelliteToCellularSwitch;
+    uint32_t forceC2sSwitchTimeoutS;
+    uint32_t forceS2cSwitchTimeoutS;
+
+    // ---- Location (for NTN locfix) ---------------------------------------
+    // NTN attach requires a location. The device programs it on the modem via
+    // AT+QNWCFG="ntn_locfix",... before registration. See LocSource above for
+    // the meaning of each option.
+    LocSource locSource;
+    uint32_t  locGpsFixTimeoutS;
+    double    locFixedLatitude;
+    double    locFixedLongitude;
+    double    locFixedAltitude;
+};
 
 
-// -----------------------------------------------------------------------------
-// Publish timing
-// -----------------------------------------------------------------------------
-// How often to publish in each mode. Do NOT set the satellite interval below
-// 10 seconds.
-#define LTE_PUBLISH_INTERVAL_MS             (60UL * 1000)
-#define NTN_PUBLISH_INTERVAL_MS             (5UL * 60 * 1000)
+// Global, populated by loadAppConfig(). Reads before loadAppConfig() runs see
+// the defaults from src/app_config.cpp.
+extern AppConfig g_cfg;
 
-
-// -----------------------------------------------------------------------------
-// Radio switching timeouts
-// -----------------------------------------------------------------------------
-// It is NOT recommended to set these below 10 minutes.
-//   CELLULAR_DISCONNECTED_TIMEOUT_MS : time disconnected on LTE before
-//                                      switching to Satellite. (There is no
-//                                      cellular "connected" timeout - if LTE is
-//                                      connected there is no reason to switch.)
-//   SATELLITE_CONNECTED_TIMEOUT_MS   : time connected on Satellite before
-//                                      switching back to test Cellular again.
-//   SATELLITE_DISCONNECTED_TIMEOUT_MS: time disconnected on Satellite before
-//                                      switching back to Cellular. Satellite
-//                                      can take a while to connect - don't set
-//                                      this too low.
-#define CELLULAR_DISCONNECTED_TIMEOUT_MS    (10UL * 60 * 1000)
-#define SATELLITE_CONNECTED_TIMEOUT_MS      (10UL * 60 * 1000)
-#define SATELLITE_DISCONNECTED_TIMEOUT_MS   (20UL * 60 * 1000)
-
-
-// -----------------------------------------------------------------------------
-// Forced switching (testing only)
-// -----------------------------------------------------------------------------
-// Set both FORCE_* flags to 0 for normal operation. Set to 1 to force a switch
-// between radios purely on the timeout below (ignores connection state) so the
-// switching logic can be exercised on the bench.
-//   e.g. FORCE_CELLULAR_TO_SATELLITE_SWITCH=1 with a 10-minute timeout switches
-//   from Cellular to Satellite after 10 minutes regardless of LTE signal.
-#define FORCE_CELLULAR_TO_SATELLITE_SWITCH          0
-#define FORCE_SATELLITE_TO_CELLULAR_SWITCH          0
-#define FORCE_C2S_SWITCH_TIMEOUT_MS                 (10UL * 60 * 1000)
-#define FORCE_S2C_SWITCH_TIMEOUT_MS                 (10UL * 60 * 1000)
-
-
-// -----------------------------------------------------------------------------
-// Location (for NTN locfix)
-// -----------------------------------------------------------------------------
-// NTN attach requires a location. The device sets it on the modem via
-// AT+QNWCFG="ntn_locfix",... before registration.
-//
-// LOC_SOURCE selects where that location comes from. Choose based on whether
-// the use case has a GNSS antenna:
-//   LOC_SOURCE_FIXED   : no GNSS antenna - always use the fixed coordinates
-//                        below; the GNSS engine is never queried.
-//   LOC_SOURCE_DYNAMIC : GNSS antenna present - query the GNSS engine for a
-//                        live fix (up to LOC_GPS_FIX_TIMEOUT_MS). If no fix is
-//                        obtained, the application falls back to the fixed
-//                        coordinates below so NTN attach can still proceed.
-#define LOC_SOURCE_FIXED                    0
-#define LOC_SOURCE_DYNAMIC                  1
-#define LOC_SOURCE                          LOC_SOURCE_FIXED
-
-// Abandon a dynamic GNSS fix attempt after this long (LOC_SOURCE_DYNAMIC only).
-#define LOC_GPS_FIX_TIMEOUT_MS              (60UL * 1000)
-
-// Fixed coordinates (decimal degrees / metres). Used as the location in
-// LOC_SOURCE_FIXED, and as the fallback in LOC_SOURCE_DYNAMIC.
-#define LOC_FIXED_LATITUDE                  (38.07315)
-#define LOC_FIXED_LONGITUDE                 (-122.16545)
-#define LOC_FIXED_ALTITUDE                  (111.8)
+// Populate g_cfg from the bundled `app_config.json` asset. Missing asset or
+// invalid JSON leaves the defaults in place; individual missing/invalid fields
+// keep their default. Call once, early in setup().
+void loadAppConfig();

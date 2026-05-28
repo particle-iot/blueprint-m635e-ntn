@@ -1,0 +1,26 @@
+{
+  "_comment": "M635E NTN Blueprint Demo - runtime configuration. Bundled as a Particle Asset and loaded in setup(). Any field missing or invalid falls back to the C++ default in src/app_config.cpp. Times are seconds, coords are decimal degrees / metres.",
+
+  "feature_lte_enabled": true,
+  "feature_ntn_enabled": true,
+
+  "start_on_cellular": true,
+
+  "lte_publish_interval_s": 60,
+  "ntn_publish_interval_s": 300,
+
+  "cellular_disconnected_timeout_s": 600,
+  "satellite_connected_timeout_s": 600,
+  "satellite_disconnected_timeout_s": 60,
+
+  "force_cellular_to_satellite_switch": false,
+  "force_satellite_to_cellular_switch": false,
+  "force_c2s_switch_timeout_s": 600,
+  "force_s2c_switch_timeout_s": 600,
+
+  "loc_source": "fixed",
+  "loc_gps_fix_timeout_s": 60,
+  "loc_fixed_latitude": 38.07315,
+  "loc_fixed_longitude": -122.16545,
+  "loc_fixed_altitude": 111.8
+}

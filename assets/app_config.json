@@ -4,7 +4,7 @@
   "feature_lte_enabled": true,
   "feature_ntn_enabled": true,
 
-  "start_on_cellular": true,
+  "start_on_cellular": false,
 
   "lte_publish_interval_s": 60,
   "ntn_publish_interval_s": 300,
@@ -20,7 +20,7 @@
 
   "loc_source": "fixed",
   "loc_gps_fix_timeout_s": 60,
-  "loc_fixed_latitude": 38.07315,
-  "loc_fixed_longitude": -122.16545,
-  "loc_fixed_altitude": 111.8
+  "loc_fixed_latitude": 44.92653,
+  "loc_fixed_longitude": -93.39767,
+  "loc_fixed_altitude": 283.0
 }

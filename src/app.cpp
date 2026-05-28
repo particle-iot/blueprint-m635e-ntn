@@ -279,28 +279,27 @@ void loop()
         case AppState::Boot:
         {
             if (g_cfg.startOnCellular && g_cfg.lteEnabled) {
-                // Cellular first
                 Log.info("RADIO CELLULAR --------------------");
                 modem.radioEnable(RADIO_CELLULAR);
-                updateConnectionTimers(true /* forced log */);
                 RGB.control(false);
-                Particle.connect();
-                transitionTo(AppState::CellularConnect);
             } else {
-                // NTN-first demo: start on Satellite.
                 Log.info("RADIO SATELLITE --------------------");
                 modem.radioEnable(RADIO_SATELLITE);
-                updateConnectionTimers(true /* forced log */);
                 RGB.control(true);
                 RGB.color(0,255,0);
-                transitionTo(AppState::AcquireLocation);
             }
+            updateConnectionTimers(true /* forced log */);
+            transitionTo(AppState::AcquireLocation);
             break;
         }
 
         // --------------------------------------------------------------------
         case AppState::CellularConnect:
         {
+            if (onEntry()) {
+                Log.info("CELLULAR CONNECT ---------------------");
+                Particle.connect();
+            }
             if (cellularShouldSwitchToSatellite()) {
                 transitionTo(AppState::SwitchToSatellite);
                 break;
@@ -336,10 +335,14 @@ void loop()
         // --------------------------------------------------------------------
         case AppState::AcquireLocation:
         {
-            // Acquire the location once and program the modem's NTN location fix
-            // before attempting registration.
+            // Acquire the location and program the modem's NTN location fix
+            // before either stack attempts to register. 
             acquireAndSetLocationFix();
-            transitionTo(AppState::SatelliteConnect);
+            if (modem.radioEnabled() == RADIO_CELLULAR) {
+                transitionTo(AppState::CellularConnect);
+            } else {
+                transitionTo(AppState::SatelliteConnect);
+            }
             break;
         }
 
@@ -405,7 +408,7 @@ void loop()
                 updateConnectionTimers(true /* forced log */);
                 RGB.control(true);
                 RGB.color(0,255,0);
-                transitionTo(AppState::AcquireLocation);
+                transitionTo(AppState::SatelliteConnect);
             } else {
                 Log.error("Failed to enable Satellite radio");
                 transitionTo(AppState::Fault);
@@ -425,8 +428,6 @@ void loop()
             Log.info("RADIO CELLULAR --------------------");
             if (modem.radioEnable(RADIO_CELLULAR) == SYSTEM_ERROR_NONE) {
                 updateConnectionTimers(true /* forced log */);
-                Log.info("CELLULAR CONNECT ---------------------");
-                Particle.connect();
                 transitionTo(AppState::CellularConnect);
             } else {
                 Log.error("Failed to enable Cellular radio");

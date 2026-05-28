@@ -264,12 +264,8 @@ int Satellite::begin() { // (const SatelliteConfig& conf) {
     // Program the NTN location fix before registration. Skylo NTN attach
     // requires a location; set it here (from a GPS fix or fixed fallback
     // provided via setLocationFix())
-    if (locFixValid_) {
-        Cellular.command(2000, "AT+QNWCFG=\"ntn_locfix\",1,%f,%f,%f", locLat_, locLon_, locAlt_);
-        Cellular.command(2000, "AT+QNWCFG=\"ntn_locfix\"");
-    } else {
-        Log.warn("No NTN location fix set before begin(); skipping ntn_locfix");
-    }
+    Cellular.command(2000, "AT+QNWCFG=\"ntn_locfix\",1,%f,%f,%f", locLat_, locLon_, locAlt_);
+    Cellular.command(2000, "AT+QNWCFG=\"ntn_locfix\"");
 
     if (isRegistered()) {
         registered_ = 1;

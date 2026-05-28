@@ -128,9 +128,9 @@ AppConfig g_cfg = {
     /* forceS2cSwitchTimeoutS         */ 10 * 60,
     /* locSource                      */ LocSource::Fixed,
     /* locGpsFixTimeoutS              */ 60,
-    /* locFixedLatitude               */ 38.07315,
-    /* locFixedLongitude              */ -122.16545,
-    /* locFixedAltitude               */ 111.8,
+    /* locFixedLatitude               */ 44.92653,
+    /* locFixedLongitude              */ -93.39767,
+    /* locFixedAltitude               */ 283.0,
 };
 
 

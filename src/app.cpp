@@ -19,6 +19,7 @@
 #include "satellite.h"
 #include "modem_manager.h"
 #include "app_config.h"
+#include "app_publisher.h"
 
 SYSTEM_MODE(SEMI_AUTOMATIC);
 
@@ -26,6 +27,7 @@ SerialLogHandler logHandler(LOG_LEVEL_ALL);
 
 Satellite satellite;
 ModemManager modem;
+AppPublisher publisher(satellite, modem);
 
 // -----------------------------------------------------------------------------
 // Application state machine
@@ -51,10 +53,6 @@ uint32_t disconnectedStartTime = 0;
 uint32_t connectedDurationAccum = 0;
 uint32_t disconnectedDurationAccum = 0;
 uint32_t radioTime = 0;
-
-int publishCount = 1;
-int satPublishSuccess = 0;
-int satPublishFailures = 0;
 
 // Location used for outgoing publishes (decimal degrees / metres). Populated
 // from a GPS fix or the fixed fallback; reused until refreshed.
@@ -147,10 +145,36 @@ void acquireAndSetLocationFix() {
     satellite.setLocationFix(lat, lon, alt, forceFixed);
 }
 
-// Build the location payload and route it to the active publish stack.
-void publishLocationData() {
-    auto now = (unsigned int)Time.now();
+// -----------------------------------------------------------------------------
+// Default publish payload - location data
+// -----------------------------------------------------------------------------
+// The blueprint exposes a single extension point - `appPublishData()` - that is
+// called on every publish tick once the active radio is connected. The default
+// definition below is a weak symbol: replace it by providing a non-weak
+// `appPublishData()` in your own .cpp to publish whatever payloads your
+// application needs. Use this function as a reference for:
+//   - looking events up in the static kEvents table (event name -> NTN code)
+//   - any per-tick preparation (here: refresh the GNSS fix on cellular)
+//   - building a `Variant` payload and calling `publisher.publish(name, v)`
+// You can publish multiple events per call; the publisher's rate limit /
+// size cap / counters apply independently to each.
 
+static void publishLocationExample() {
+    // On cellular we refresh the GNSS fix on every publish so the payload
+    // carries up-to-date coordinates. On satellite the location is already
+    // programmed into the modem (ntn_locfix) and the cached values from
+    // AcquireLocation are reused as-is.
+    if (modem.radioEnabled() == RADIO_CELLULAR) {
+        if (satellite.getGNSSLocation(g_cfg.locGpsFixTimeoutS * 1000UL) == 0) {
+            auto p = satellite.lastPositionInfo();
+            pubLat = p.latitude;
+            pubLon = p.longitude;
+            pubAlt = p.altitude;
+            havePubLoc = true;
+        }
+    }
+
+    auto now = (unsigned int)Time.now();
     particle::Variant locEvent;
     locEvent.set("cmd", "loc");
     locEvent.set("time", now);
@@ -162,20 +186,14 @@ void publishLocationData() {
         locationObject.set("alt", pubAlt);
     locEvent.set("loc", locationObject);
 
-    Log.info("publishing location %s", locEvent.toJSON().c_str());
+    publisher.publish("loc", locEvent);
+}
 
-    if (satellite.connected()) {
-        Log.info("SATELLITE PUBLISH: {\"count\":%d} ------------------", publishCount);
-        auto satPublishResult = satellite.publish(1 /* code */, locEvent);
-        satPublishResult < 0 ? satPublishFailures++ : satPublishSuccess++;
-        Log.info("Satellite publish successes/total %d/%d ", satPublishSuccess, satPublishSuccess + satPublishFailures);
-        publishCount++;
-    } else if (Particle.connected()) {
-        Log.info("CELLULAR PUBLISH: {\"count\":%d} ------------------", publishCount);
-        auto cloudPublishResult = Particle.publish("loc", locEvent);
-        Log.info("Cellular publish result: %d", cloudPublishResult);
-        publishCount++;
-    }
+// Weak default: publishes the location example. Define your own
+// `appPublishData()` in a separate .cpp to replace this.
+__attribute__((weak)) void appPublishData() {
+    publishLocationExample();
+    publisher.logStats();
 }
 
 void updateConnectionTimers(bool force=false) {
@@ -253,7 +271,7 @@ void updateConnectionTimers(bool force=false) {
 void setup()
 {
     waitFor(Serial.isConnected, 10000);
-    WiFi.clearCredentials(); // force testing on Cellular/Satellite
+    // WiFi.clearCredentials(); // force testing on Cellular/Satellite
 
     pinMode(D7, OUTPUT);
     digitalWrite(D7, LOW);
@@ -318,15 +336,7 @@ void loop()
                 break;
             }
             if (Particle.connected() && (millis() - lastPublish > g_cfg.ltePublishIntervalS * 1000UL)) {
-                // Refresh location for the LTE publish where a fix is available.
-                if (satellite.getGNSSLocation(g_cfg.locGpsFixTimeoutS * 1000UL) == 0) {
-                    auto p = satellite.lastPositionInfo();
-                    pubLat = p.latitude;
-                    pubLon = p.longitude;
-                    pubAlt = p.altitude;
-                    havePubLoc = true;
-                }
-                publishLocationData();
+                appPublishData();
                 lastPublish = millis();
             }
             break;
@@ -387,8 +397,7 @@ void loop()
                 break;
             }
             if (satellite.connected() && (millis() - lastPublish > g_cfg.ntnPublishIntervalS * 1000UL)) {
-                // Publish using the location cached on NTN entry.
-                publishLocationData();
+                appPublishData();
                 lastPublish = millis();
             }
             break;

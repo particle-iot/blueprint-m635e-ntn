@@ -151,7 +151,7 @@ int CloudProtocol::publishImpl(int code, std::optional<Variant> data) {
     }
     util::Buffer reqData;
     CHECK(util::encodeProtobuf(reqData, &reqMsg, &PB_CLOUD(EventRequest_msg)));
-    Log.trace("Sending Event request");
+    Log.trace("Sending Event request %d", code);
     CHECK(channel_.sendRequest(RequestType::EVENT, std::move(reqData), [](auto err, auto result, auto /* data */) {
         if (err < 0) {
             Log.error("Failed to send Event request: %d", err);

@@ -33,27 +33,23 @@
 // gated by g_cfg.ntnPublishIntervalS. LTE is not rate-limited at the app
 // layer (the cloud enforces its own limits).
 //
-// NTN size cap: payloads whose JSON form exceeds kNtnMaxPayloadBytes are
-// rejected before the AT command is issued. JSON length is a conservative
-// upper bound on the on-wire CBOR length.
+// NTN size cap: enforced inside the satellite library (MessageChannel checks
+// header + body against the configured maxPayloadSize and returns
+// Error::TOO_LARGE). The publisher just maps that return code to
+// stats_.oversized so the app surfaces oversized failures consistently.
 //
 // Success counters reflect the synchronous return from the underlying stack:
 // for NTN, that is "AT command accepted by the modem", NOT cloud delivery.
 // See README/docs for the distinction.
 class AppPublisher {
 public:
-    // Conservative upper bound on NTN payload size, enforced before send.
-    // Matches the M635E NTN blueprint spec. Note that the underlying
-    // MessageChannel currently has its own (smaller) hardcoded cap.
-    static constexpr size_t kNtnMaxPayloadBytes = 256;
-
     struct Stats {
         uint32_t lteOk       = 0;
         uint32_t lteFail     = 0;
         uint32_t ntnOk       = 0; // AT-accepted, not end-to-end ack
         uint32_t ntnFail     = 0;
         uint32_t dropped     = 0; // no radio connected at publish time
-        uint32_t oversized   = 0; // exceeded kNtnMaxPayloadBytes on NTN
+        uint32_t oversized   = 0; // library returned Error::TOO_LARGE
         uint32_t rateLimited = 0; // bucket gap not yet elapsed
         uint32_t unknownEvent = 0; // name not in kEvents
     };

@@ -281,6 +281,8 @@ void setup()
     // compiled defaults in app_config.cpp.
     loadAppConfig();
 
+    satellite.setMaxPayloadSize(g_cfg.ntnMaxPayloadSize);
+
     modem.begin();
 
     // Hardware is initialised; the Boot state selects and enables the start radio.

@@ -88,6 +88,10 @@ public:
     int getGNSSLocation(unsigned int maxFixWaitTimeMs = 120000);
     int publishLocation();
 
+    void setMaxPayloadSize(size_t size) {
+        maxPayloadSize_ = size;
+    }
+
     // Provide the location used for the NTN location fix (AT+QNWCFG="ntn_locfix").
     // Stores the coordinates so begin() can program them into the modem before
     // NTN registration. Must be called before begin() to take effect on the
@@ -127,6 +131,8 @@ private:
     // When true, getGNSSLocation() returns the stored loc{Lat,Lon,Alt}_ without
     // querying the GNSS engine. Set via setLocationFix(forceFixed=true).
     bool locForceFixed_ = false;
+
+    size_t maxPayloadSize_ = 0;
     constrained::CloudProtocol proto_;
 
     char publishBuffer[1024] = {};

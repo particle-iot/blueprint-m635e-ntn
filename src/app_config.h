@@ -64,6 +64,13 @@ struct AppConfig {
     uint32_t ltePublishIntervalS;
     uint32_t ntnPublishIntervalS;
 
+    // ---- NTN payload cap --------------------------------------------------
+    // Max on-wire frame size (header + body) for outbound NTN publishes. The
+    // satellite library will reject frames larger than this with
+    // Error::TOO_LARGE before any AT traffic. Matches the modem's AT-command
+    // body limit (256 raw bytes = 512 hex chars on the AT line).
+    uint32_t ntnMaxPayloadSize;
+
     // ---- Radio switching timeouts ----------------------------------------
     // Seconds. It is NOT recommended to set these below 10 minutes (600 s) for
     // production.

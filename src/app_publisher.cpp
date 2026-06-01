@@ -73,15 +73,6 @@ int AppPublisher::publish(const char* name, const particle::Variant& data) {
             return SYSTEM_ERROR_INVALID_STATE;
         }
 
-        // Size check (conservative: JSON length >= CBOR length for our payloads).
-        String json = data.toJSON();
-        if (json.length() > kNtnMaxPayloadBytes) {
-            ++stats_.oversized;
-            pubLog.error("NTN publish '%s' oversized: %u > %u bytes",
-                ev->name, (unsigned)json.length(), (unsigned)kNtnMaxPayloadBytes);
-            return SYSTEM_ERROR_TOO_LARGE;
-        }
-
         // Single NTN rate-limit bucket: every NTN event (including vitals)
         // is gated by the same minimum gap.
         const uint32_t now = millis();
@@ -100,6 +91,12 @@ int AppPublisher::publish(const char* name, const particle::Variant& data) {
             pubLog.info("NTN publish '%s' code=%u AT-accepted (#%lu)",
                 ev->name, (unsigned)ev->code, (unsigned long)stats_.ntnOk);
             return 0;
+        }
+        if (r == SYSTEM_ERROR_TOO_LARGE) {
+            ++stats_.oversized;
+            pubLog.error("NTN publish '%s' code=%u rejected as too large",
+                ev->name, (unsigned)ev->code);
+            return r;
         }
         ++stats_.ntnFail;
         pubLog.warn("NTN publish '%s' code=%u failed: %d (#%lu)",

@@ -88,6 +88,7 @@ int CloudProtocol::init(CloudProtocolConfig conf) {
     }
     MessageChannelConfig chanConf;
     chanConf.onSend(conf.onSend_);
+    chanConf.maxPayloadSize(conf.maxPayloadSize_);
     chanConf.onRequest([this](auto type, auto data, auto onResp) {
         return receiveRequest(type, std::move(data), std::move(onResp));
     });

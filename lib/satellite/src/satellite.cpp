@@ -288,6 +288,8 @@ int Satellite::begin() { // (const SatelliteConfig& conf) {
     protoConf.onSend([this](auto data, auto port, auto /* onAck */) {
         return tx((const uint8_t*)data.data(), data.size(), port);
     });
+
+    protoConf.maxPayloadSize(maxPayloadSize_);
     int r = proto_.init(protoConf);
     if (r < 0) {
         Log.error("CloudProtocol::init() failed: %d", r);

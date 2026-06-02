@@ -73,6 +73,9 @@ public:
     bool connected(void);
     int tx(const uint8_t* buf, size_t len, int port);
 
+    // NTN UDP ID used to wrap uplink frames in a UdpEnvelope on the IP/UDP NTN path.
+    void setNtnUdpId(const uint8_t* id, size_t len);
+
     int publish(int code) {
         return proto_.publish(code);
     }
@@ -107,6 +110,8 @@ private:
     uint32_t registrationUpdateMs_ = 0;
     uint32_t noRegistrationTimer_ = 0;
     int errorCount_ = 0;
+    const uint8_t* udpId_ = nullptr;
+    size_t udpIdLen_ = 0;
     GnssPositioningInfo lastPositionInfo_;
     constrained::CloudProtocol proto_;
 

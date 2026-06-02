@@ -20,8 +20,17 @@ public:
         return *this;
     }
 
+    // Enable wrapping uplink frames in a UdpEnvelope, using `id` as the envelope id (bytes).
+    CloudProtocolConfig& udpEnvelope(const uint8_t* id, size_t len) {
+        envelope_ = true;
+        udpId_ = (id && len) ? util::Buffer((const char*)id, len) : util::Buffer();
+        return *this;
+    }
+
 private:
     MessageChannel::OnSend onSend_;
+    util::Buffer udpId_;
+    bool envelope_ = false;
 
     friend class CloudProtocol;
 };

@@ -19,7 +19,24 @@ To add a new message, check out the `constrained/sc-126020` branch in `device-os
 
 ## Cloud Build & Flash
 
-`$ particle compile msom . --target 5.8.0 --saveTo msom-sat@5.8.0.bin; particle usb dfu; particle flash --local msom-sat@5.8.0.bin`
+This app targets Device OS **6.4.1** on the **msom** platform.
+
+One-liner (compile, DFU, flash):
+
+`$ particle compile msom . --target 6.4.1 --saveTo msom-sat@6.4.1.bin; particle usb dfu; particle flash --local msom-sat@6.4.1.bin`
+
+Cloud compile:
+
+```sh
+particle compile msom . --target 6.4.1 --saveTo msom-sat@6.4.1.bin
+```
+
+Flash the built binary over DFU:
+
+```sh
+particle usb dfu
+particle flash --local msom-sat@6.4.1.bin
+```
 
 ## Known Issues
 

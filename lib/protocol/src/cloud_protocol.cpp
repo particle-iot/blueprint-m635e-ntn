@@ -80,6 +80,35 @@ private:
     size_t offs_;
 };
 
+struct EncodedUint8Bytes {
+    const uint8_t* data;
+    size_t size;
+
+    explicit EncodedUint8Bytes(pb_callback_t* cb, const uint8_t* data = nullptr, size_t size = 0) :
+            data(data),
+            size(size) {
+        cb->arg = this;
+        cb->funcs.encode = [](pb_ostream_t* strm, const pb_field_iter_t* field, void* const* arg) {
+            const auto str = (const EncodedUint8Bytes*)*arg;
+            if (str->data && str->size > 0 && (!pb_encode_tag_for_field(strm, field) ||
+                    !pb_encode_string(strm, (const uint8_t*)str->data, str->size))) {
+                return false;
+            }
+            return true;
+        };
+    }
+};
+
+// Wrap an already-framed constrained-protocol frame in a UdpEnvelope (IP/UDP NTN uplink only).
+int encodeUdpEnvelope(util::Buffer& out, const util::Buffer& id, const util::Buffer& frame) {
+    PB_CLOUD(UdpEnvelope) env = {};
+    env.ver = 1;
+    EncodedUint8Bytes idBytes(&env.id, (const uint8_t*)id.data(), id.size());
+    EncodedUint8Bytes dataBytes(&env.data, (const uint8_t*)frame.data(), frame.size());
+    CHECK(util::encodeProtobuf(out, &env, &PB_CLOUD(UdpEnvelope_msg)));
+    return 0;
+}
+
 } // namespace
 
 int CloudProtocol::init(CloudProtocolConfig conf) {
@@ -87,7 +116,18 @@ int CloudProtocol::init(CloudProtocolConfig conf) {
         return 0;
     }
     MessageChannelConfig chanConf;
-    chanConf.onSend(conf.onSend_);
+    if (conf.envelope_) {
+        auto realOnSend = conf.onSend_;
+        util::Buffer udpId = conf.udpId_; // owned copy captured into the lambda
+        chanConf.onSend([realOnSend, udpId](util::Buffer data, int port,
+                                            MessageChannel::OnAck onAck) -> int {
+            util::Buffer enveloped;
+            CHECK(encodeUdpEnvelope(enveloped, udpId, data));
+            return realOnSend(std::move(enveloped), port, std::move(onAck));
+        });
+    } else {
+        chanConf.onSend(conf.onSend_); // bare frames (Non-IP path), unchanged
+    }
     chanConf.onRequest([this](auto type, auto data, auto onResp) {
         return receiveRequest(type, std::move(data), std::move(onResp));
     });
@@ -220,25 +260,6 @@ int CloudProtocol::receiveEventRequest(util::Buffer data, MessageChannel::OnResp
     return 0;
 }
 
-
-struct EncodedUint8Bytes {
-    const uint8_t* data;
-    size_t size;
-
-    explicit EncodedUint8Bytes(pb_callback_t* cb, const uint8_t* data = nullptr, size_t size = 0) :
-            data(data),
-            size(size) {
-        cb->arg = this;
-        cb->funcs.encode = [](pb_ostream_t* strm, const pb_field_iter_t* field, void* const* arg) {
-            const auto str = (const EncodedUint8Bytes*)*arg;
-            if (str->data && str->size > 0 && (!pb_encode_tag_for_field(strm, field) ||
-                    !pb_encode_string(strm, (const uint8_t*)str->data, str->size))) {
-                return false;
-            }
-            return true;
-        };
-    }
-};
 
 bool encodeDiagMap(pb_ostream_t *stream, const pb_field_t *field, void* const* arg) {
     auto map = (const std::map<uint32_t, std::vector<uint8_t>>*)*arg;

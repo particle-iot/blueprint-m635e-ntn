@@ -50,6 +50,10 @@ ModemManager modem;
 // to Satellite if cellular signal drops.
 #define START_ON_CELLULAR (0)
 
+// Temporary NTN UDP ID — per-device identifier provisioned in the device DB; gates/identifies
+// uplink UDP packets wrapped in UdpEnvelope. TODO: replace with the real provisioned value.
+static const uint8_t NTN_UDP_ID[] = { 0xDE, 0xAD, 0xBE, 0xEF };
+
 typedef enum AppPublishState {
     WaitForConnnect,
     GetGNSSLocation,
@@ -154,6 +158,9 @@ void setup()
     // it is less expensive and can handle larger payloads.
     Log.info("RADIO CELLULAR --------------------");
     modem.begin();
+
+    // Provide the NTN UDP ID used to wrap uplink frames in a UdpEnvelope (IP/UDP NTN path only).
+    satellite.setNtnUdpId(NTN_UDP_ID, sizeof(NTN_UDP_ID));
 
 #if START_ON_CELLULAR
     // Start on Cellular

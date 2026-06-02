@@ -84,7 +84,13 @@ typedef struct _particle_cloud_DescriptionResponse_AppDescription_LegacyFunction
     pb_callback_t name; 
 } particle_cloud_DescriptionResponse_AppDescription_LegacyFunction;
 
+/* *
+ Probe how long the carrier's NAT keeps the device's UDP source mapping
+ alive. The service waits `delay_ms` before replying; if the response
+ arrives, the binding survived ≥ `delay_ms`. */
 typedef struct _particle_cloud_DiagnosticsResponse { 
+    /* *
+ Requested delay before the service replies (milliseconds). */
     pb_callback_t sources; 
 } particle_cloud_DiagnosticsResponse;
 
@@ -124,14 +130,29 @@ typedef struct _particle_cloud_DescriptionResponse_AppDescription_Subscription {
     bool constrained; 
 } particle_cloud_DescriptionResponse_AppDescription_Subscription;
 
+/* *
+ UDP transport envelope. Uplink-only — service-to-device packets are bare
+ constrained-protocol frames with no envelope. */
 typedef struct _particle_cloud_DiagnosticsRequest { 
+    /* *
+ Envelope version. Must be 1 for this design. */
     bool has_categories;
     uint32_t categories; 
+    /* *
+ NTN UDP ID — per-device identifier provisioned in the device DB. Acts as
+ a lightweight gate (unknown IDs are dropped). */
     pb_callback_t ids; 
 } particle_cloud_DiagnosticsRequest;
 
 typedef struct _particle_cloud_DiagnosticsResponse_Source { 
+    /* *
+ Echoed from the request. */
     uint32_t id; 
+    /* *
+ Delay the service actually held the reply for. Differs from the
+ request's `delay_ms` when the service clamped it. Firmware MUST use
+ this value, not its own requested delay, when concluding "NAT binding
+ survived ≥ X". */
     pb_callback_t data; 
 } particle_cloud_DiagnosticsResponse_Source;
 
@@ -180,6 +201,22 @@ typedef struct _particle_cloud_HelloResponse {
     uint32_t flags; 
 } particle_cloud_HelloResponse;
 
+typedef struct _particle_cloud_NatProbeRequest { 
+    uint32_t delay_ms; 
+    pb_callback_t nonce; 
+} particle_cloud_NatProbeRequest;
+
+typedef struct _particle_cloud_NatProbeResponse { 
+    pb_callback_t nonce; 
+    uint32_t actual_delay_ms; 
+} particle_cloud_NatProbeResponse;
+
+typedef struct _particle_cloud_UdpEnvelope { 
+    uint32_t ver; 
+    pb_callback_t id; 
+    pb_callback_t data; 
+} particle_cloud_UdpEnvelope;
+
 
 /* Helper constants for enums */
 #define _particle_cloud_HelloRequest_Flag_MIN particle_cloud_HelloRequest_Flag_FLAG_NONE
@@ -225,6 +262,9 @@ extern "C" {
 #define particle_cloud_DiagnosticsResponse_Source_init_default {0, {{NULL}, NULL}}
 #define particle_cloud_EventRequest_init_default {0, {{{NULL}, NULL}}, {{NULL}, NULL}}
 #define particle_cloud_EventResponse_init_default {0}
+#define particle_cloud_UdpEnvelope_init_default  {0, {{NULL}, NULL}, {{NULL}, NULL}}
+#define particle_cloud_NatProbeRequest_init_default {0, {{NULL}, NULL}}
+#define particle_cloud_NatProbeResponse_init_default {{{NULL}, NULL}, 0}
 #define particle_cloud_HelloRequest_init_zero    {0, false, 0, 0, {0, {0}}, false, {0, {0}}}
 #define particle_cloud_HelloResponse_init_zero   {0}
 #define particle_cloud_DescriptionRequest_init_zero {false, 0, false, 0}
@@ -238,6 +278,9 @@ extern "C" {
 #define particle_cloud_DiagnosticsResponse_Source_init_zero {0, {{NULL}, NULL}}
 #define particle_cloud_EventRequest_init_zero    {0, {{{NULL}, NULL}}, {{NULL}, NULL}}
 #define particle_cloud_EventResponse_init_zero   {0}
+#define particle_cloud_UdpEnvelope_init_zero     {0, {{NULL}, NULL}, {{NULL}, NULL}}
+#define particle_cloud_NatProbeRequest_init_zero {0, {{NULL}, NULL}}
+#define particle_cloud_NatProbeResponse_init_zero {{{NULL}, NULL}, 0}
 
 /* Field tags (for use in manual encoding/decoding) */
 #define particle_cloud_DescriptionResponse_AppDescription_subscriptions_tag 1
@@ -268,6 +311,13 @@ extern "C" {
 #define particle_cloud_HelloRequest_system_description_hash_tag 4
 #define particle_cloud_HelloRequest_app_description_hash_tag 5
 #define particle_cloud_HelloResponse_flags_tag   1
+#define particle_cloud_NatProbeRequest_delay_ms_tag 1
+#define particle_cloud_NatProbeRequest_nonce_tag 2
+#define particle_cloud_NatProbeResponse_nonce_tag 1
+#define particle_cloud_NatProbeResponse_actual_delay_ms_tag 2
+#define particle_cloud_UdpEnvelope_ver_tag       1
+#define particle_cloud_UdpEnvelope_id_tag        2
+#define particle_cloud_UdpEnvelope_data_tag      3
 
 /* Struct field encoding specification for nanopb */
 #define particle_cloud_HelloRequest_FIELDLIST(X, a) \
@@ -357,6 +407,25 @@ X(a, CALLBACK, OPTIONAL, BYTES,    data,              3)
 #define particle_cloud_EventResponse_CALLBACK NULL
 #define particle_cloud_EventResponse_DEFAULT NULL
 
+#define particle_cloud_UdpEnvelope_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UINT32,   ver,               1) \
+X(a, CALLBACK, SINGULAR, BYTES,    id,                2) \
+X(a, CALLBACK, SINGULAR, BYTES,    data,              3)
+#define particle_cloud_UdpEnvelope_CALLBACK pb_default_field_callback
+#define particle_cloud_UdpEnvelope_DEFAULT NULL
+
+#define particle_cloud_NatProbeRequest_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UINT32,   delay_ms,          1) \
+X(a, CALLBACK, SINGULAR, BYTES,    nonce,             2)
+#define particle_cloud_NatProbeRequest_CALLBACK pb_default_field_callback
+#define particle_cloud_NatProbeRequest_DEFAULT NULL
+
+#define particle_cloud_NatProbeResponse_FIELDLIST(X, a) \
+X(a, CALLBACK, SINGULAR, BYTES,    nonce,             1) \
+X(a, STATIC,   SINGULAR, UINT32,   actual_delay_ms,   2)
+#define particle_cloud_NatProbeResponse_CALLBACK pb_default_field_callback
+#define particle_cloud_NatProbeResponse_DEFAULT NULL
+
 extern const pb_msgdesc_t particle_cloud_HelloRequest_msg;
 extern const pb_msgdesc_t particle_cloud_HelloResponse_msg;
 extern const pb_msgdesc_t particle_cloud_DescriptionRequest_msg;
@@ -370,6 +439,9 @@ extern const pb_msgdesc_t particle_cloud_DiagnosticsResponse_msg;
 extern const pb_msgdesc_t particle_cloud_DiagnosticsResponse_Source_msg;
 extern const pb_msgdesc_t particle_cloud_EventRequest_msg;
 extern const pb_msgdesc_t particle_cloud_EventResponse_msg;
+extern const pb_msgdesc_t particle_cloud_UdpEnvelope_msg;
+extern const pb_msgdesc_t particle_cloud_NatProbeRequest_msg;
+extern const pb_msgdesc_t particle_cloud_NatProbeResponse_msg;
 
 /* Defines for backwards compatibility with code written before nanopb-0.4.0 */
 #define particle_cloud_HelloRequest_fields &particle_cloud_HelloRequest_msg
@@ -385,6 +457,9 @@ extern const pb_msgdesc_t particle_cloud_EventResponse_msg;
 #define particle_cloud_DiagnosticsResponse_Source_fields &particle_cloud_DiagnosticsResponse_Source_msg
 #define particle_cloud_EventRequest_fields &particle_cloud_EventRequest_msg
 #define particle_cloud_EventResponse_fields &particle_cloud_EventResponse_msg
+#define particle_cloud_UdpEnvelope_fields &particle_cloud_UdpEnvelope_msg
+#define particle_cloud_NatProbeRequest_fields &particle_cloud_NatProbeRequest_msg
+#define particle_cloud_NatProbeResponse_fields &particle_cloud_NatProbeResponse_msg
 
 /* Maximum encoded size of messages (where known) */
 /* particle_cloud_DescriptionResponse_size depends on runtime parameters */
@@ -396,6 +471,9 @@ extern const pb_msgdesc_t particle_cloud_EventResponse_msg;
 /* particle_cloud_DiagnosticsResponse_size depends on runtime parameters */
 /* particle_cloud_DiagnosticsResponse_Source_size depends on runtime parameters */
 /* particle_cloud_EventRequest_size depends on runtime parameters */
+/* particle_cloud_UdpEnvelope_size depends on runtime parameters */
+/* particle_cloud_NatProbeRequest_size depends on runtime parameters */
+/* particle_cloud_NatProbeResponse_size depends on runtime parameters */
 #define particle_cloud_DescriptionRequest_size   10
 #define particle_cloud_EventResponse_size        0
 #define particle_cloud_HelloRequest_size         61

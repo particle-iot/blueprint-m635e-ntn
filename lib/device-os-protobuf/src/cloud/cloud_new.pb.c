@@ -45,6 +45,15 @@ PB_BIND(particle_cloud_EventRequest, particle_cloud_EventRequest, AUTO)
 PB_BIND(particle_cloud_EventResponse, particle_cloud_EventResponse, AUTO)
 
 
+PB_BIND(particle_cloud_UdpEnvelope, particle_cloud_UdpEnvelope, AUTO)
+
+
+PB_BIND(particle_cloud_NatProbeRequest, particle_cloud_NatProbeRequest, AUTO)
+
+
+PB_BIND(particle_cloud_NatProbeResponse, particle_cloud_NatProbeResponse, AUTO)
+
+
 
 
 

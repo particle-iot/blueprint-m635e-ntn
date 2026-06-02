@@ -322,6 +322,12 @@ int Satellite::begin() { // (const SatelliteConfig& conf) {
     protoConf.onSend([this](auto data, auto port, auto /* onAck */) {
         return tx((const uint8_t*)data.data(), data.size(), port);
     });
+#if USE_NON_IP
+    // Legacy Non-IP NTN: bare constrained-protocol frames, no UDP envelope.
+#else
+    // IP/UDP NTN: wrap uplink frames in a UdpEnvelope (id gates the device at the service).
+    protoConf.udpEnvelope(udpId_, udpIdLen_);
+#endif
     int r = proto_.init(protoConf);
     if (r < 0) {
         Log.error("CloudProtocol::init() failed: %d", r);
@@ -483,6 +489,11 @@ void Satellite::receiveData(void) {
             }
         }
     }
+}
+
+void Satellite::setNtnUdpId(const uint8_t* id, size_t len) {
+    udpId_ = id;
+    udpIdLen_ = len;
 }
 
 int Satellite::tx(const uint8_t* buf, size_t len, int port) {

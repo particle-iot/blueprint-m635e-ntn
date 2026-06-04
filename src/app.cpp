@@ -146,24 +146,15 @@ void acquireAndSetLocationFix() {
 }
 
 // -----------------------------------------------------------------------------
-// Default publish payload - location data
+// Publish payloads
 // -----------------------------------------------------------------------------
-// The blueprint exposes a single extension point - `appPublishData()` - that is
-// called on every publish tick once the active radio is connected. The default
-// definition below is a weak symbol: replace it by providing a non-weak
-// `appPublishData()` in your own .cpp to publish whatever payloads your
-// application needs. Use this function as a reference for:
-//   - looking events up in the static kEvents table (event name -> NTN code)
-//   - any per-tick preparation (here: refresh the GNSS fix on cellular)
+// The blueprint calls appPublishData() on every publish tick once the active
+// radio is connected. Edit it to publish whatever payloads your application
+// needs. Each helper below is an example of the pattern:
+//   - any per-tick preparation (e.g. refresh the GNSS fix on cellular)
 //   - building a `Variant` payload and calling `publisher.publish(name, v)`
-// You can publish multiple events per call; the publisher's rate limit /
-// size cap / counters apply independently to each.
 
 static void publishLocationExample() {
-    // On cellular we refresh the GNSS fix on every publish so the payload
-    // carries up-to-date coordinates. On satellite the location is already
-    // programmed into the modem (ntn_locfix) and the cached values from
-    // AcquireLocation are reused as-is.
     if (modem.radioEnabled() == RADIO_CELLULAR) {
         if (satellite.getGNSSLocation(g_cfg.locGpsFixTimeoutS * 1000UL) == 0) {
             auto p = satellite.lastPositionInfo();
@@ -189,10 +180,21 @@ static void publishLocationExample() {
     publisher.publish("loc", locEvent);
 }
 
-// Weak default: publishes the location example. Define your own
-// `appPublishData()` in a separate .cpp to replace this.
-__attribute__((weak)) void appPublishData() {
-    publishLocationExample();
+// Example of an arbitrary named event. "event" is in the kEvents table so it
+// maps to that NTN code; any name not in the table falls back to
+// kDefaultNtnEventCode.
+static void publishEventExample() {
+    auto now = (unsigned int)Time.now();
+    particle::Variant event;
+    event.set("cmd", "test");
+    event.set("time", now);
+
+    publisher.publish("event", event);
+}
+
+void appPublishData() {
+    // publishLocationExample();
+    publishEventExample();
     publisher.logStats();
 }
 

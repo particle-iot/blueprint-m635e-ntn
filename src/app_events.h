@@ -26,6 +26,10 @@
 // NTN publishes by integer code, and subscriptions on both sides reuse this
 // table.
 //
+// Arbitrary event names are allowed. LTE always publishes by name. NTN needs
+// an integer code: names listed here map to their code; any name not listed
+// falls back to kDefaultNtnEventCode.
+//
 // To add an event: append a row. Codes must be unique; names must be unique.
 struct EventDef {
     const char* name;
@@ -35,9 +39,12 @@ struct EventDef {
 constexpr EventDef kEvents[] = {
     { "loc",    1 },
     { "vitals", 2 },
+    { "event",  3 }
 };
 
 constexpr size_t kEventsCount = sizeof(kEvents) / sizeof(kEvents[0]);
+
+constexpr uint8_t kDefaultNtnEventCode = 0;
 
 inline const EventDef* findEvent(const char* name) {
     for (size_t i = 0; i < kEventsCount; ++i) {

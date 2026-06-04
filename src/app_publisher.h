@@ -51,7 +51,7 @@ public:
         uint32_t dropped     = 0; // no radio connected at publish time
         uint32_t oversized   = 0; // library returned Error::TOO_LARGE
         uint32_t rateLimited = 0; // bucket gap not yet elapsed
-        uint32_t unknownEvent = 0; // name not in kEvents
+        uint32_t unknownEvent = 0; // name not in kEvents (used kDefaultNtnEventCode on NTN)
     };
 
     AppPublisher(particle::Satellite& sat, particle::ModemManager& modem);

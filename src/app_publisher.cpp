@@ -40,11 +40,18 @@ AppPublisher::AppPublisher(particle::Satellite& sat, particle::ModemManager& mod
 }
 
 int AppPublisher::publish(const char* name, const particle::Variant& data) {
+    if (!name) {
+        pubLog.error("publish: null event name");
+        return SYSTEM_ERROR_INVALID_ARGUMENT;
+    }
+
+    // Arbitrary event names are accepted. LTE publishes by name regardless;
+    // NTN needs an integer code, so a name not in kEvents falls back to the
+    // default code (and is counted so the miss is visible in stats).
     const EventDef* ev = findEvent(name);
+    const uint8_t code = ev ? ev->code : kDefaultNtnEventCode;
     if (!ev) {
         ++stats_.unknownEvent;
-        pubLog.error("publish: unknown event '%s'", name ? name : "(null)");
-        return SYSTEM_ERROR_NOT_FOUND;
     }
 
     const auto radio = modem_.radioEnabled();
@@ -52,24 +59,24 @@ int AppPublisher::publish(const char* name, const particle::Variant& data) {
     if (radio == RADIO_CELLULAR) {
         if (!Particle.connected()) {
             ++stats_.dropped;
-            pubLog.warn("publish '%s': LTE not connected, dropped", ev->name);
+            pubLog.warn("publish '%s': LTE not connected, dropped", name);
             return SYSTEM_ERROR_INVALID_STATE;
         }
-        bool ok = Particle.publish(ev->name, data);
+        bool ok = Particle.publish(name, data);
         if (ok) {
             ++stats_.lteOk;
-            pubLog.info("LTE publish '%s' ok (#%lu)", ev->name, (unsigned long)stats_.lteOk);
+            pubLog.info("LTE publish '%s' ok (#%lu)", name, (unsigned long)stats_.lteOk);
             return 0;
         }
         ++stats_.lteFail;
-        pubLog.warn("LTE publish '%s' failed (#%lu)", ev->name, (unsigned long)stats_.lteFail);
+        pubLog.warn("LTE publish '%s' failed (#%lu)", name, (unsigned long)stats_.lteFail);
         return SYSTEM_ERROR_NETWORK;
     }
 
     if (radio == RADIO_SATELLITE) {
         if (!sat_.connected()) {
             ++stats_.dropped;
-            pubLog.warn("publish '%s': NTN not connected, dropped", ev->name);
+            pubLog.warn("publish '%s': NTN not connected, dropped", name);
             return SYSTEM_ERROR_INVALID_STATE;
         }
 
@@ -80,33 +87,33 @@ int AppPublisher::publish(const char* name, const particle::Variant& data) {
         if (!gapElapsed(ntnLastSendMs_, now, gapMs)) {
             ++stats_.rateLimited;
             pubLog.info("NTN publish '%s' rate-limited (%lums since last, gap %lums)",
-                ev->name, (unsigned long)(now - ntnLastSendMs_), (unsigned long)gapMs);
+                name, (unsigned long)(now - ntnLastSendMs_), (unsigned long)gapMs);
             return SYSTEM_ERROR_LIMIT_EXCEEDED;
         }
 
-        int r = sat_.publish(ev->code, data);
+        int r = sat_.publish(code, data);
         if (r == 0) {
             ntnLastSendMs_ = now ? now : 1; // avoid the "never sent" sentinel
             ++stats_.ntnOk;
             pubLog.info("NTN publish '%s' code=%u AT-accepted (#%lu)",
-                ev->name, (unsigned)ev->code, (unsigned long)stats_.ntnOk);
+                name, (unsigned)code, (unsigned long)stats_.ntnOk);
             return 0;
         }
         if (r == SYSTEM_ERROR_TOO_LARGE) {
             ++stats_.oversized;
             pubLog.error("NTN publish '%s' code=%u rejected as too large",
-                ev->name, (unsigned)ev->code);
+                name, (unsigned)code);
             return r;
         }
         ++stats_.ntnFail;
         pubLog.warn("NTN publish '%s' code=%u failed: %d (#%lu)",
-            ev->name, (unsigned)ev->code, r, (unsigned long)stats_.ntnFail);
+            name, (unsigned)code, r, (unsigned long)stats_.ntnFail);
         return r;
     }
 
     // Radio not yet selected.
     ++stats_.dropped;
-    pubLog.warn("publish '%s': no radio enabled, dropped", ev->name);
+    pubLog.warn("publish '%s': no radio enabled, dropped", name);
     return SYSTEM_ERROR_INVALID_STATE;
 }
 

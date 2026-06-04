@@ -81,6 +81,38 @@ const char* locSourceName(LocSource s) {
     return "?";
 }
 
+// Optional Particle environment variable that overrides the fixed GNSS
+// location. Format: "<latitude>,<longitude>,<altitude>" in decimal degrees /
+// metres (e.g. "44.92653,-93.39767,283.0"). When present and well-formed it
+// replaces loc_fixed_latitude / longitude / altitude from the JSON asset.
+constexpr const char* kEnvLocationFixed = "PARTICLE_LOCATION_FIXED";
+
+void applyFixedLocationEnv() {
+    String val;
+    if (!System.getEnv(kEnvLocationFixed, val)) {
+        return; // not defined; keep JSON/default values
+    }
+    double lat = 0, lon = 0, alt = 0;
+    if (sscanf(val.c_str(), "%lf,%lf,%lf", &lat, &lon, &alt) != 3) {
+        cfgLog.warn("env '%s'='%s' not in '<lat>,<lon>,<alt>' form; ignoring",
+            kEnvLocationFixed, val.c_str());
+        return;
+    }
+    g_cfg.locFixedLatitude = lat;
+    g_cfg.locFixedLongitude = lon;
+    g_cfg.locFixedAltitude = alt;
+    cfgLog.info("env '%s' overrides fixed location: (%f, %f, %f)",
+        kEnvLocationFixed, lat, lon, alt);
+
+    // The env var supplies a static location, so force Fixed mode: the GNSS
+    // engine is never queried and these coordinates are always used.
+    if (g_cfg.locSource == LocSource::Dynamic) {
+        cfgLog.warn("env '%s' present; forcing loc_source fixed (was dynamic)",
+            kEnvLocationFixed);
+    }
+    g_cfg.locSource = LocSource::Fixed;
+}
+
 // Find the bundled asset by name. Returns an empty (invalid) asset if not
 // present.
 ApplicationAsset findAsset(const char* name) {
@@ -170,6 +202,11 @@ void loadAppConfig() {
             }
         }
     }
+
+    // Optional env override for the fixed location, applied after the JSON
+    // asset so it takes precedence over loc_fixed_* and is reflected in the
+    // config dump below.
+    applyFixedLocationEnv();
 
     // At least one stack must be enabled.
     if (!g_cfg.lteEnabled && !g_cfg.ntnEnabled) {

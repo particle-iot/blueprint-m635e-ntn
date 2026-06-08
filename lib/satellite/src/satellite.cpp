@@ -34,44 +34,9 @@ LOG_SOURCE_CATEGORY("ncp.client");
 
 #define USE_NON_IP 0
 // #define UDP_ENDPOINT_NAME "publish-receiver-udp.particle.io"
-#define UDP_ENDPOINT_NAME "3.80.138.180"
+#define UDP_ENDPOINT_NAME "13.219.177.65"
 #define UDP_PORT 40000
-
-/*
-// List of all defined system errors
-    NONE                        0
-    UNKNOWN                  -100
-    BUSY                     -110
-    NOT_SUPPORTED            -120
-    NOT_ALLOWED              -130
-    CANCELLED                -140
-    ABORTED                  -150
-    TIMEOUT                  -160
-    NOT_FOUND                -170
-    ALREADY_EXISTS           -180
-    TOO_LARGE                -190
-    NOT_ENOUGH_DATA          -191
-    LIMIT_EXCEEDED           -200
-    END_OF_STREAM            -201
-    INVALID_STATE            -210
-    FLASH_IO                 -219
-    IO                       -220
-    WOULD_BLOCK              -221
-    FILE                     -225
-    PATH_TOO_LONG            -226
-    NETWORK                  -230
-    PROTOCOL                 -240
-    INTERNAL                 -250
-    NO_MEMORY                -260
-    INVALID_ARGUMENT         -270
-    BAD_DATA                 -280
-    OUT_OF_RANGE             -290
-    DEPRECATED               -300
-    ...
-    AT_NOT_OK               -1200
-    AT_RESPONSE_UNEXPECTED  -1210
-    ...
-*/
+#define UDP_CONNECT_ID 0
 
 namespace particle {
 
@@ -147,8 +112,10 @@ int Satellite::cbQIRD(int type, const char* buf, int len, char* outBuf) {
   if (incomingPacketLength == 0) {
     auto ret = sscanf(buf, "\r\n+QIRD: %d\r\n", &incomingPacketLength);
     // Log.info("ret: %d incomingPacketLength: %d", ret, incomingPacketLength);
-  } else if(outBuf){
-    strncpy(outBuf, &buf[2], incomingPacketLength);
+  } else if(outBuf) {
+    // skip the leading "\r\n" in the response and copy the hex data to outBuf for processing
+    Log.info("%x %x %x %x", buf[0], buf[1], buf[2], buf[3]);
+    memcpy(outBuf, &buf[2], incomingPacketLength);
     incomingPacketLength = 0;
   }
 
@@ -158,8 +125,14 @@ int Satellite::cbQIRD(int type, const char* buf, int len, char* outBuf) {
 int Satellite::cbQISENDEX(int type, const char* buf, int len, int* param)
 {
     // Log.info("%s", buf);
-    if (strcmp(buf, "\r\nSEND OK\r\n") == 0) {
+    if (strstr(buf, "SEND OK")) {
         return RESP_OK;
+    }
+    // QISENDEX reports a failed send as "SEND FAIL"; the modem may also emit a
+    // bare "ERROR". Return RESP_ERROR so the command fails fast and the caller
+    // can retry instead of waiting out the full timeout.
+    if (strstr(buf, "SEND FAIL") || (type & TYPE_ERROR)) {
+        return RESP_ERROR;
     }
     return WAIT;
 }
@@ -195,7 +168,7 @@ int Satellite::isRegistered() {
     if ((RESP_OK == Cellular.command(cbCOPS, network, 10000, "AT+COPS?"))
             && (strcmp(network,"") != 0))
     {
-        Log.info("SATELLITE NETWORK REGISTERED = %s\r\n", network);
+        Log.trace("SATELLITE NETWORK REGISTERED = %s\r\n", network);
         reg = 1;
         noRegistrationTimer_ = 0;
     } else {
@@ -339,7 +312,7 @@ int Satellite::connectImpl() {
                 r = Cellular.command(150 * 1000, "AT+QIACT=1");
                 Cellular.command(2000, "AT+QIACT?");
                 
-                r = Cellular.command(150 * 1000, "AT+QIOPEN=1,0,\"UDP\",\"%s\",%d", UDP_ENDPOINT_NAME, UDP_PORT);
+                r = Cellular.command(150 * 1000, "AT+QIOPEN=1,%d,\"UDP\",\"%s\",%d", UDP_CONNECT_ID, UDP_ENDPOINT_NAME, UDP_PORT);
                 // r = Cellular.command(150 * 1000, "AT+QIOPEN=1,0,\"UDP\",\"100.95.0.251\",%d", UDP_PORT);
                 // Cellular.command(2000, "AT+QCSCON=1");
                 if (r == RESP_OK) {
@@ -385,6 +358,11 @@ int Satellite::disconnect() {
     nwConnected = NW_CONNECTED_INIT;
     ntnConnected = 0;
 
+#if !USE_NON_IP
+    Cellular.command(2000, "AT+QICLOSE=%d", UDP_CONNECT_ID);
+    Cellular.command(2000, "AT+QIDEACT=1");
+#endif
+
     return 0;
 }
 
@@ -426,21 +404,18 @@ void Satellite::receiveData(void) {
         atResponse = Cellular.command(cbQCFGEXTquery, &recv, 10000, "AT+QCFGEXT=\"nipdr\",0");
 #else 
         Cellular.command(2000, "AT+QISTATE?");
-        atResponse = Cellular.command(cbQIRDquery, &recv, 60 * 1000, "AT+QIRD=0,0");
+        atResponse = Cellular.command(cbQIRDquery, &recv, 60 * 1000, "AT+QIRD=%d,0", UDP_CONNECT_ID);
 #endif
-        if ((RESP_OK == atResponse) && (recv > 0))
-        {
+        if ((RESP_OK == atResponse) && (recv > 0)) {
 #if USE_NON_IP
             atResponse = Cellular.command(cbQCFGEXTread, rxData, 10000, "AT+QCFGEXT=\"nipdr\",%d,1", recv);
 #else 
-            atResponse = Cellular.command(cbQIRD, rxData, 10000, "AT+QIRD=0,%d", recv);
+            atResponse = Cellular.command(cbQIRD, rxData, 10000, "AT+QIRD=%d,%d", UDP_CONNECT_ID, recv);
 #endif
             // Receive hex data
-            if ((RESP_OK == atResponse) && (strcmp(rxData,"") != 0))
-            {
-                Log.info("%d BYTES RECEIVED!", recv);
-                auto dataBuf = util::Buffer(recv);
-                hexToBytes(rxData, dataBuf.data(), recv);
+            if ((RESP_OK == atResponse) && recv) {
+                Log.info("%d Bytes Read", recv);
+                auto dataBuf = util::Buffer(rxData, recv);
                 LOG_DUMP(TRACE, dataBuf.data(), recv);
                 LOG_PRINTF(TRACE, "\r\n");
                 proto_.receive(dataBuf, 223);
@@ -465,18 +440,26 @@ int Satellite::tx(const uint8_t* buf, size_t len, int port) {
     auto hexLength = toHex(buf, len, hexBuf.get(), hexBufSize);
     Log.info("TX %d->%d bytes", len, hexLength);
     Log.trace("%s", (char*)hexBuf.get());
+
+    constexpr int kMaxSendAttempts = 3;
 #if USE_NON_IP
     auto r = Cellular.command(2000, "AT+QCFGEXT=\"nipds\",1,\"%s\",%d", hexBuf.get(), len);
 #else
     int dummy;
-    auto r = Cellular.command(2000, "AT+QISENDEX=0,\"test\",0"); // TODO: FIX THIS
-    r = Cellular.command(cbQISENDEX, &dummy, 2000, "AT+QISENDEX=0,\"%s\",0", hexBuf.get());
+    int r = RESP_ERROR;
+    for (int attempt = 1; attempt <= kMaxSendAttempts; ++attempt) {
+        r = Cellular.command(cbQISENDEX, &dummy, 2000, "AT+QISENDEX=%d,\"%s\",0", UDP_CONNECT_ID, hexBuf.get());
+        if (r == RESP_OK) {
+            break;
+        }
+        Log.warn("QISENDEX attempt %d/%d failed: %d", attempt, kMaxSendAttempts, r);
+    }
 #endif
     // Send hex data
     if (RESP_OK == r) {
-        Log.info("Bytes Sent %d", hexLength);
+        Log.info("Bytes Sent %d", len);
     } else {
-        Log.error("Error sending: %d bytes: %d", r, hexLength);
+        Log.error("Error sending after %d attempts: %d bytes: %d", kMaxSendAttempts, len, r);
         errorCount_++;
         return -1;
     }

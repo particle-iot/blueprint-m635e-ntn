@@ -224,6 +224,17 @@ uint32_t activePublishIntervalS() {
                                                      : g_cfg.ltePublishIntervalS;
 }
 
+// Human-readable name for a Device OS cellular access technology.
+const char* accessTechName(hal_net_access_tech_t rat) {
+    switch (rat) {
+        case NET_ACCESS_TECHNOLOGY_GSM:         return "GSM";
+        case NET_ACCESS_TECHNOLOGY_LTE:         return "LTE";
+        case NET_ACCESS_TECHNOLOGY_LTE_CAT_M1:  return "LTE-M";
+        case NET_ACCESS_TECHNOLOGY_LTE_CAT_NB1: return "NB-IoT";
+        default:                                return "unknown";
+    }
+}
+
 void updateConnectionTimers(bool force=false) {
     int connected = 0;
     static int lastConnected = -1;
@@ -307,7 +318,7 @@ void updateConnectionTimers(bool force=false) {
                 "[Time Until Next Publish: %lus]", (unsigned long)untilNextS);
         }
 
-        // NTN signal / band, refreshed by satellite.process(). 
+        // NTN signal / band, refreshed by satellite.process().
         if (off < sizeof(line) && modem.radioEnabled() == RADIO_SATELLITE) {
             auto c = satellite.servingCellInfo();
             if (c.state[0] != '\0') {
@@ -319,6 +330,22 @@ void updateConnectionTimers(bool force=false) {
                     off += snprintf(line + off, sizeof(line) - off,
                         "[Sig: %s (acquiring)]", c.state);
                 }
+            }
+        }
+
+        // LTE signal via Device OS (Cellular.RSSI() -> cellular_signal()).
+        // Reports access tech, RSRP (strength) and RSRQ (quality) in real units
+        // plus 0-100% bars. RSSI/SINR are not exposed by this API.
+        if (off < sizeof(line) && modem.radioEnabled() == RADIO_CELLULAR) {
+            CellularSignal sig = Cellular.RSSI();
+            if (sig.isValid()) {
+                off += snprintf(line + off, sizeof(line) - off,
+                    "[Sig: %s RSRP=%.0fdBm RSRQ=%.0fdB Strength=%.0f%% Quality=%.0f%%]",
+                    accessTechName(sig.getAccessTechnology()),
+                    sig.getStrengthValue(), sig.getQualityValue(),
+                    sig.getStrength(), sig.getQuality());
+            } else {
+                off += snprintf(line + off, sizeof(line) - off, "[Sig: no service]");
             }
         }
 

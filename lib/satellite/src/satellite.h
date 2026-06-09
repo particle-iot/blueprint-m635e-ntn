@@ -51,6 +51,34 @@ struct GnssPositioningInfo {
     int valid;
 };
 
+// Parsed AT+QENG="servingcell" response. Field order follows the Quectel
+// servingcell report:
+//   +QENG: "servingcell",<state>,<rat>,<duplex>,<mcc>,<mnc>,<cellId(hex)>,
+//          <pcid>,<earfcn>,<band>,<ulBw>,<dlBw>,<tac(hex)>,<rsrp>,<rsrq>,
+//          <rssi>,<sinr>,<srxlev>
+// When the modem is still searching it reports only the state field, so
+// `valid` distinguishes "full signal metrics present" from a bare state.
+struct NtnServingCellInfo {
+    bool valid = false;          // true when the full signal metrics parsed
+    char state[12] = {};         // SEARCH / LIMSRV / CONNECT / NOCONN ...
+    char rat[16] = {};           // e.g. "NTN NBIoT"
+    char duplex[8] = {};         // FDD / TDD
+    int mcc = 0;                 // mobile country code (901 = Skylo NTN shared)
+    int mnc = 0;                 // mobile network code
+    unsigned int cellId = 0;     // cell identity (hex on the wire)
+    int pcid = 0;                // physical cell ID
+    int earfcn = 0;              // channel number
+    int band = 0;                // frequency band
+    int ulBandwidth = 0;
+    int dlBandwidth = 0;
+    unsigned int tac = 0;        // tracking area code (hex on the wire)
+    int rsrp = 0;                // dBm
+    int rsrq = 0;                // dB
+    int rssi = 0;                // dBm
+    int sinr = 0;                // Quectel index 0-250 -> -20..+30 dB
+    int srxlev = 0;              // cell-selection RX level
+};
+
 class SpecialJSONWriter : public spark::JSONBufferWriter {
 
   public:
@@ -108,6 +136,10 @@ public:
         return lastPositionInfo_;
     };
 
+    NtnServingCellInfo servingCellInfo(void) {
+        return servingCell_;
+    };
+
 private:
 
     bool begun_; // true if begin() previously called
@@ -118,10 +150,12 @@ private:
     volatile uint8_t nwConnectionDesired = NW_STATE_IDLE;
     uint32_t lastReceivedCheck_ = 0;
     uint32_t lastRegistrationCheck_ = 0;
+    uint32_t lastServingCellCheck_ = 0;
     uint32_t registrationUpdateMs_ = 0;
     uint32_t noRegistrationTimer_ = 0;
     int errorCount_ = 0;
     GnssPositioningInfo lastPositionInfo_;
+    NtnServingCellInfo servingCell_;
 
     // NTN location fix coordinates programmed via AT+QNWCFG="ntn_locfix".
     double locLat_ = 0;
@@ -145,8 +179,10 @@ private:
     static int cbQISENDEX(int type, const char* buf, int len, int* param);
     static int cbQCFGEXTread(int type, const char* buf, int len, char* rxdata);
     static int cbQGPSLOC(int type, const char* buf, int len, GnssPositioningInfo* info);
+    static int cbQENG(int type, const char* buf, int len, NtnServingCellInfo* info);
 
     int isRegistered(void);
+    int queryServingCell(void);
     int waitAtResponse(unsigned int tries, unsigned int timeout = 1000);
     int publishImpl(int code, const std::optional<Variant>& data = std::nullopt);
     void updateRegistration(bool force = false);

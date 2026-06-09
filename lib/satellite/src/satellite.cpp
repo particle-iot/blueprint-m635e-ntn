@@ -49,6 +49,8 @@ namespace {
 #define SATELLITE_NCP_REGISTRATION_UPDATE_FAST_MS (5000)
 #define SATELLITE_NCP_RECEIVE_UPDATE_MS (10000)
 
+#define SATELLITE_NCP_SERVINGCELL_UPDATE_MS (5000)
+
 #define SATELLITE_NCP_NO_REGISTRATION_MS (540000)
 
 #define SATELLITE_NCP_COMM_ERRORS_MAX (3)
@@ -161,6 +163,27 @@ int Satellite::cbQGPSLOC(int type, const char* buf, int len, GnssPositioningInfo
     return WAIT;
 }
 
+int Satellite::cbQENG(int type, const char* buf, int len, NtnServingCellInfo* info)
+{
+    if ((type != TYPE_PLUS) || !info) {
+        return WAIT;
+    }
+    NtnServingCellInfo p;
+    // state, rat, duplex are quoted; cellId and tac are hex; the rest decimal.
+    int n = sscanf(buf,
+            "\r\n+QENG: \"servingcell\",\"%11[^\"]\",\"%15[^\"]\",\"%7[^\"]\",%d,%d,%x,%d,%d,%d,%d,%d,%x,%d,%d,%d,%d,%d",
+            p.state, p.rat, p.duplex, &p.mcc, &p.mnc, &p.cellId, &p.pcid, &p.earfcn,
+            &p.band, &p.ulBandwidth, &p.dlBandwidth, &p.tac, &p.rsrp, &p.rsrq,
+            &p.rssi, &p.sinr, &p.srxlev);
+    if (n >= 1) {
+        // Full signal metrics require everything up to SINR (16 fields);
+        // srxlev (the 17th) is often empty. A bare state (e.g. SEARCH) gives n==1.
+        p.valid = (n >= 16);
+        *info = p;
+    }
+    return WAIT;
+}
+
 // Pure query: returns 1 if registered on a network, 0 otherwise.
 int Satellite::isRegistered() {
     char network[32] = "";
@@ -170,18 +193,14 @@ int Satellite::isRegistered() {
         // Log.trace("SATELLITE NETWORK REGISTERED = %s", network);
         return 1;
     }
-    // TODO: parse responses
-    // 0000033907 [ncp.at] TRACE: > AT+QENG="servingcell"
-    // 0000033925 [ncp.at] TRACE: < +QENG: "servingcell","LIMSRV","NTN NBIoT","FDD",901,98,2C480D,29,7689,23,0,0,7ED,-122,-14,-107,90,
-    // 0000033931 [ncp.at] TRACE: < OK
-
-    // 0000085165 [ncp.at] TRACE: > AT+QENG="servingcell"
-    // 0000085183 [ncp.at] TRACE: < +QIOPEN: 0,0
-    // 0000085196 [ncp.at] TRACE: < +QENG: "servingcell","CONNECT","NTN NBIoT","FDD",901,98,2C480D,29,7689,23,0,0,7ED,-122,-14,-108,90,
-    // 0000085231 [ncp.at] TRACE: < OK
-    Cellular.command(2000, "AT+QENG=\"servingcell\"");
-    // Log.info("NOT REGISTERED YET");
     return 0;
+}
+
+// Query and parse the serving-cell report into servingCell_.
+int Satellite::queryServingCell() {
+    servingCell_ = NtnServingCellInfo{};
+    Cellular.command(cbQENG, &servingCell_, 2000, "AT+QENG=\"servingcell\"");
+    return servingCell_.state[0] ? 0 : -1;
 }
 
 int Satellite::waitAtResponse(unsigned int tries, unsigned int timeout) {
@@ -570,6 +589,11 @@ int Satellite::process(bool force) {
     connectImpl();
     receiveData();
     processErrors();
+    // Refresh the serving-cell signal report for status/diagnostics.
+    if (force || millis() - lastServingCellCheck_ >= SATELLITE_NCP_SERVINGCELL_UPDATE_MS) {
+        lastServingCellCheck_ = millis();
+        queryServingCell();
+    }
     proto_.run();
 
     return 0;

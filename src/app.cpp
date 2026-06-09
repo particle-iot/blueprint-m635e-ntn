@@ -291,19 +291,38 @@ void updateConnectionTimers(bool force=false) {
 
     static uint32_t lastCheck = millis();
     if (force || millis() - lastCheck > 5000) {
+        // Print a status line
         lastCheck = millis();
         uint32_t timeInStateS = (millis() - stateEnterTime) / 1000UL;
-        if (activeRadioConnected()) {
+
+        char line[256];
+        size_t off = snprintf(line, sizeof(line), "[%s][%s][Time In State: %lus]",
+            activeProfileName(), stateName(appState), (unsigned long)timeInStateS);
+
+        if (off < sizeof(line) && activeRadioConnected()) {
             uint32_t intervalMs = activePublishIntervalS() * 1000UL;
             uint32_t sinceLast = millis() - lastPublish;
             uint32_t untilNextS = (sinceLast >= intervalMs) ? 0 : (intervalMs - sinceLast) / 1000UL;
-            Log.info("[%s][%s][Time In State: %lus][Time Until Next Publish: %lus]",
-                activeProfileName(), stateName(appState),
-                (unsigned long)timeInStateS, (unsigned long)untilNextS);
-        } else {
-            Log.info("[%s][%s][Time In State: %lus]",
-                activeProfileName(), stateName(appState), (unsigned long)timeInStateS);
+            off += snprintf(line + off, sizeof(line) - off,
+                "[Time Until Next Publish: %lus]", (unsigned long)untilNextS);
         }
+
+        // NTN signal / band, refreshed by satellite.process(). 
+        if (off < sizeof(line) && modem.radioEnabled() == RADIO_SATELLITE) {
+            auto c = satellite.servingCellInfo();
+            if (c.state[0] != '\0') {
+                if (c.valid) {
+                    off += snprintf(line + off, sizeof(line) - off,
+                        "[Sig: %s band=%d earfcn=%d RSRP=%ddBm RSRQ=%ddB RSSI=%ddBm SINR=%d]",
+                        c.state, c.band, c.earfcn, c.rsrp, c.rsrq, c.rssi, c.sinr);
+                } else {
+                    off += snprintf(line + off, sizeof(line) - off,
+                        "[Sig: %s (acquiring)]", c.state);
+                }
+            }
+        }
+
+        Log.info("%s", line);
     }
 }
 

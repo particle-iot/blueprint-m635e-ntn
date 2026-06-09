@@ -46,7 +46,7 @@ namespace {
 
 #define SATELLITE_NCP_RX_DATA_READ_TIMEOUT_MS (3000)
 #define SATELLITE_NCP_REGISTRATION_UPDATE_SLOW_MS (60000)
-#define SATELLITE_NCP_REGISTRATION_UPDATE_FAST_MS (15000)
+#define SATELLITE_NCP_REGISTRATION_UPDATE_FAST_MS (5000)
 #define SATELLITE_NCP_RECEIVE_UPDATE_MS (10000)
 
 #define SATELLITE_NCP_NO_REGISTRATION_MS (540000)
@@ -161,24 +161,27 @@ int Satellite::cbQGPSLOC(int type, const char* buf, int len, GnssPositioningInfo
     return WAIT;
 }
 
+// Pure query: returns 1 if registered on a network, 0 otherwise.
 int Satellite::isRegistered() {
-    int reg = 0;
     char network[32] = "";
     Cellular.command(2000, "AT+CEREG?");
     if ((RESP_OK == Cellular.command(cbCOPS, network, 10000, "AT+COPS?"))
-            && (strcmp(network,"") != 0))
-    {
-        Log.trace("SATELLITE NETWORK REGISTERED = %s\r\n", network);
-        reg = 1;
-        noRegistrationTimer_ = 0;
-    } else {
-        Log.info("NOT REGISTERED YET");
-        if (!noRegistrationTimer_) {
-            noRegistrationTimer_ = millis();
-        }
+            && (strcmp(network, "") != 0)) {
+        // Log.trace("SATELLITE NETWORK REGISTERED = %s", network);
+        return 1;
     }
+    // TODO: parse responses
+    // 0000033907 [ncp.at] TRACE: > AT+QENG="servingcell"
+    // 0000033925 [ncp.at] TRACE: < +QENG: "servingcell","LIMSRV","NTN NBIoT","FDD",901,98,2C480D,29,7689,23,0,0,7ED,-122,-14,-107,90,
+    // 0000033931 [ncp.at] TRACE: < OK
 
-    return reg;
+    // 0000085165 [ncp.at] TRACE: > AT+QENG="servingcell"
+    // 0000085183 [ncp.at] TRACE: < +QIOPEN: 0,0
+    // 0000085196 [ncp.at] TRACE: < +QENG: "servingcell","CONNECT","NTN NBIoT","FDD",901,98,2C480D,29,7689,23,0,0,7ED,-122,-14,-108,90,
+    // 0000085231 [ncp.at] TRACE: < OK
+    Cellular.command(2000, "AT+QENG=\"servingcell\"");
+    // Log.info("NOT REGISTERED YET");
+    return 0;
 }
 
 int Satellite::waitAtResponse(unsigned int tries, unsigned int timeout) {
@@ -282,72 +285,58 @@ int Satellite::connectImpl() {
     if (nwConnectionDesired != NW_STATE_CONNECT || connected()) {
         return 0;
     }
+    if (!registered_) {
+        return 0;
+    }
 
-    auto r = 0;
     static uint32_t lastConnectAttempt;
+    if (millis() - lastConnectAttempt <= 5000) {
+        return 0;
+    }
+    lastConnectAttempt = millis();
 
-    if (millis() - lastConnectAttempt > 5000) {
-        if (!ntnConnected) {
-            if (isRegistered()) {
-                Cellular.command(2000, "AT+CEREG?");
-                int r = 0;
-
+    if (!ntnConnected) {
+        int r = 0;
 #if USE_NON_IP
-                r = Cellular.command(2000, "AT+QCFGEXT=\"nipdcfg\",0,\"particle.io\"");
-                if (r == RESP_OK) {
-                    r = Cellular.command(2000, "AT+QCFGEXT=\"nipdcfg\"");
-                }
-                if (r == RESP_OK) {
-                    r = Cellular.command(2000, "AT+QCFGEXT=\"nipd\",1,30");
-                    ntnConnected = 1;
-                } else {
-                    ntnConnected = 0;
-                    nwConnected = NW_CONNECTED_FAILED;
-                }
-#else 
-                Cellular.command(2000, "AT+QICSGP=1");
-                Cellular.command(2000, "AT+QIACT?");
+        r = Cellular.command(2000, "AT+QCFGEXT=\"nipdcfg\",0,\"particle.io\"");
+        if (r == RESP_OK) {
+            r = Cellular.command(2000, "AT+QCFGEXT=\"nipdcfg\"");
+        }
+        if (r == RESP_OK) {
+            r = Cellular.command(2000, "AT+QCFGEXT=\"nipd\",1,30");
+            ntnConnected = 1;
+        } else {
+            ntnConnected = 0;
+            nwConnected = NW_CONNECTED_FAILED;
+        }
+#else
+        Cellular.command(2000, "AT+QICSGP=1");
+        Cellular.command(2000, "AT+QIACT?");
 
-                Cellular.command(2000, "AT+QICSGP=1,1,\"360Connect\"");
-                r = Cellular.command(150 * 1000, "AT+QIACT=1");
-                Cellular.command(2000, "AT+QIACT?");
-                
-                r = Cellular.command(150 * 1000, "AT+QIOPEN=1,%d,\"UDP\",\"%s\",%d", UDP_CONNECT_ID, UDP_ENDPOINT_NAME, UDP_PORT);
-                // r = Cellular.command(150 * 1000, "AT+QIOPEN=1,0,\"UDP\",\"100.95.0.251\",%d", UDP_PORT);
-                // Cellular.command(2000, "AT+QCSCON=1");
-                if (r == RESP_OK) {
-                    ntnConnected = NW_CONNECTED_SUCCESS;
-                } else {
-                    Cellular.command(2000, "AT+QISTATE?");
-                    ntnConnected = NW_CONNECTED_FAILED;
-                }
+        Cellular.command(2000, "AT+QICSGP=1,1,\"360Connect\"");
+        r = Cellular.command(150 * 1000, "AT+QIACT=1");
+        Cellular.command(2000, "AT+QIACT?");
+
+        r = Cellular.command(150 * 1000, "AT+QIOPEN=1,%d,\"UDP\",\"%s\",%d", UDP_CONNECT_ID, UDP_ENDPOINT_NAME, UDP_PORT);
+
+        if (r == RESP_OK) {
+            ntnConnected = NW_CONNECTED_SUCCESS;
+        } else {
+            Cellular.command(2000, "AT+QISTATE?");
+            ntnConnected = NW_CONNECTED_FAILED;
+        }
 #endif
-            } else {
-                nwConnected = NW_CONNECTED_INIT;
-                ntnConnected = 0;
-                // Toggle CFUN if no registration for a long time
-                if (millis() - noRegistrationTimer_ > SATELLITE_NCP_NO_REGISTRATION_MS) {
-                    Log.info("No registration for %d minutes, toggling CFUN.", SATELLITE_NCP_NO_REGISTRATION_MS/60000);
-                    Cellular.command(20000, "AT+CFUN=0");
-                    Cellular.command(20000, "AT+CFUN=1");
-                    noRegistrationTimer_ = millis();
-                }
-            }
-            Cellular.command(2000, "AT+QENG=\"servingcell\"");
-        }
+    }
 
-        if (ntnConnected) {
-            r = proto_.connect();
-            if (r < 0) {
-                Log.error("CloudProtocol::connect() failed: %d", r);
-                nwConnected = NW_CONNECTED_FAILED;
-                return r;
-            }
-            Log.info("Connected to the Cloud");
-            nwConnected = NW_CONNECTED_SUCCESS;
+    if (ntnConnected) {
+        int r = proto_.connect();
+        if (r < 0) {
+            Log.error("CloudProtocol::connect() failed: %d", r);
+            nwConnected = NW_CONNECTED_FAILED;
+            return r;
         }
-
-        lastConnectAttempt = millis();
+        Log.info("Connected to the Satellite");
+        nwConnected = NW_CONNECTED_SUCCESS;
     }
 
     return 0;
@@ -370,26 +359,41 @@ bool Satellite::connected(void) {
     return (nwConnected == NW_CONNECTED_SUCCESS) && (nwConnectionDesired == NW_STATE_CONNECT);
 }
 
+// Sole owner of registration state. Polls registration on one timer, maintains
+// registered_, handles reattach/detach, and recovers from prolonged loss of
+// registration. connectImpl() consumes registered_ but never polls itself.
 void Satellite::updateRegistration(bool force) {
-    // periodically check for registration
-    if (force || millis() - lastRegistrationCheck_ >= registrationUpdateMs_) {
-        // Log.info("registered_:%d, connected():%d, nwConnected:%d, nwConnectionDesired:%d", registered_, connected(), nwConnected, nwConnectionDesired);
-        int r = isRegistered();
-        if (r == 1 && registered_ == 0) {
-            // we just reattached, reconnect to NTN
-            nwConnected = NW_CONNECTED_INIT;
-            ntnConnected = 0;
-            registered_ = r;
-            connect();
-        } else if (r == 0) {
-            // detached, reset NTN connection
+    if (!force && millis() - lastRegistrationCheck_ < registrationUpdateMs_) {
+        return;
+    }
+    lastRegistrationCheck_ = millis();
+
+    int r = isRegistered();
+
+    if (r) {
+        noRegistrationTimer_ = 0;
+        if (!registered_) {
             nwConnected = NW_CONNECTED_INIT;
             ntnConnected = 0;
         }
-        registered_ = r;
-        lastRegistrationCheck_ = millis();
-        registrationUpdateMs_ = connected() ? SATELLITE_NCP_REGISTRATION_UPDATE_SLOW_MS : SATELLITE_NCP_REGISTRATION_UPDATE_FAST_MS;
+    } else {
+        nwConnected = NW_CONNECTED_INIT;
+        ntnConnected = 0;
+        if (!noRegistrationTimer_) {
+            noRegistrationTimer_ = millis();
+        } else if (millis() - noRegistrationTimer_ > SATELLITE_NCP_NO_REGISTRATION_MS) {
+            // Prolonged no-registration: kick the radio.
+            Log.info("No registration for %d minutes, toggling CFUN.", SATELLITE_NCP_NO_REGISTRATION_MS / 60000);
+            Cellular.command(20000, "AT+CFUN=0");
+            Cellular.command(20000, "AT+CFUN=1");
+            noRegistrationTimer_ = millis();
+        }
     }
+
+    registered_ = r;
+    // Poll fast until connected, then back off.
+    registrationUpdateMs_ = connected() ? SATELLITE_NCP_REGISTRATION_UPDATE_SLOW_MS
+                                         : SATELLITE_NCP_REGISTRATION_UPDATE_FAST_MS;
 }
 
 void Satellite::receiveData(void) {

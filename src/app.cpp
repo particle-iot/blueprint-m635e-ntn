@@ -46,6 +46,7 @@ enum class AppState {
 
 static AppState appState = AppState::Boot;
 static bool stateEntry = true;   // true on the first loop() after a transition
+uint32_t stateEnterTime = 0;     // millis() when the current state was entered
 
 uint32_t lastPublish = 0;
 uint32_t connectedStartTime = 0;
@@ -80,6 +81,7 @@ void transitionTo(AppState next) {
     Log.info("STATE: %s -> %s", stateName(appState), stateName(next));
     appState = next;
     stateEntry = true;
+    stateEnterTime = millis();
 }
 
 // True only on the first loop() iteration after entering the current state.
@@ -198,6 +200,30 @@ void appPublishData() {
     publisher.logStats();
 }
 
+// Human-readable name of the currently enabled radio.
+const char* activeProfileName() {
+    switch (modem.radioEnabled()) {
+        case RADIO_CELLULAR:  return "Cellular";
+        case RADIO_SATELLITE: return "Satellite";
+        default:              return "None";
+    }
+}
+
+// Is the currently enabled radio connected?
+bool activeRadioConnected() {
+    switch (modem.radioEnabled()) {
+        case RADIO_CELLULAR:  return Particle.connected();
+        case RADIO_SATELLITE: return satellite.connected();
+        default:              return false;
+    }
+}
+
+// Publish interval (seconds) for the currently enabled radio.
+uint32_t activePublishIntervalS() {
+    return (modem.radioEnabled() == RADIO_SATELLITE) ? g_cfg.ntnPublishIntervalS
+                                                     : g_cfg.ltePublishIntervalS;
+}
+
 void updateConnectionTimers(bool force=false) {
     int connected = 0;
     static int lastConnected = -1;
@@ -266,7 +292,18 @@ void updateConnectionTimers(bool force=false) {
     static uint32_t lastCheck = millis();
     if (force || millis() - lastCheck > 5000) {
         lastCheck = millis();
-        Log.info("[%s] Con: %lu, Dis: %lu ConAccum: %lu, DisAccum: %lu", satellite.connected() ? "CONNECTED" : "DISCONNECTED", millis() - connectedStartTime, millis() - disconnectedStartTime, connectedDurationAccum, disconnectedDurationAccum);
+        uint32_t timeInStateS = (millis() - stateEnterTime) / 1000UL;
+        if (activeRadioConnected()) {
+            uint32_t intervalMs = activePublishIntervalS() * 1000UL;
+            uint32_t sinceLast = millis() - lastPublish;
+            uint32_t untilNextS = (sinceLast >= intervalMs) ? 0 : (intervalMs - sinceLast) / 1000UL;
+            Log.info("[%s][%s][Time In State: %lus][Time Until Next Publish: %lus]",
+                activeProfileName(), stateName(appState),
+                (unsigned long)timeInStateS, (unsigned long)untilNextS);
+        } else {
+            Log.info("[%s][%s][Time In State: %lus]",
+                activeProfileName(), stateName(appState), (unsigned long)timeInStateS);
+        }
     }
 }
 
@@ -290,6 +327,7 @@ void setup()
     // Hardware is initialised; the Boot state selects and enables the start radio.
     appState = AppState::Boot;
     stateEntry = true;
+    stateEnterTime = millis();
 }
 
 void loop()
@@ -339,7 +377,8 @@ void loop()
                 transitionTo(AppState::SwitchToSatellite);
                 break;
             }
-            if (Particle.connected() && (millis() - lastPublish > g_cfg.ltePublishIntervalS * 1000UL)) {
+            if (Particle.connected() &&
+                    (onEntry() || (millis() - lastPublish > g_cfg.ltePublishIntervalS * 1000UL))) {
                 appPublishData();
                 lastPublish = millis();
             }
@@ -400,7 +439,8 @@ void loop()
                 transitionTo(AppState::SwitchToCellular);
                 break;
             }
-            if (satellite.connected() && (millis() - lastPublish > g_cfg.ntnPublishIntervalS * 1000UL)) {
+            if (satellite.connected() &&
+                    (onEntry() || (millis() - lastPublish > g_cfg.ntnPublishIntervalS * 1000UL))) {
                 appPublishData();
                 lastPublish = millis();
             }

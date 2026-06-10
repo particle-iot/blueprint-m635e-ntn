@@ -150,6 +150,45 @@ void acquireAndSetLocationFix() {
 }
 
 // -----------------------------------------------------------------------------
+// Active radio accessors
+// -----------------------------------------------------------------------------
+
+// Human-readable name of the currently enabled radio.
+const char* activeProfileName() {
+    switch (modem.radioEnabled()) {
+        case RADIO_CELLULAR:  return "Cellular";
+        case RADIO_SATELLITE: return "Satellite";
+        default:              return "None";
+    }
+}
+
+// Is the currently enabled radio connected?
+bool activeRadioConnected() {
+    switch (modem.radioEnabled()) {
+        case RADIO_CELLULAR:  return Particle.connected();
+        case RADIO_SATELLITE: return satellite.connected();
+        default:              return false;
+    }
+}
+
+// Publish interval (seconds) for the currently enabled radio.
+uint32_t activePublishIntervalS() {
+    return (modem.radioEnabled() == RADIO_SATELLITE) ? g_cfg.ntnPublishIntervalS
+                                                     : g_cfg.ltePublishIntervalS;
+}
+
+// Human-readable name for a Device OS cellular access technology.
+const char* accessTechName(hal_net_access_tech_t rat) {
+    switch (rat) {
+        case NET_ACCESS_TECHNOLOGY_GSM:         return "GSM";
+        case NET_ACCESS_TECHNOLOGY_LTE:         return "LTE";
+        case NET_ACCESS_TECHNOLOGY_LTE_CAT_M1:  return "LTE-M";
+        case NET_ACCESS_TECHNOLOGY_LTE_CAT_NB1: return "NB-IoT";
+        default:                                return "unknown";
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Publish payloads
 // -----------------------------------------------------------------------------
 // The blueprint calls appPublishData() on every publish tick once the active
@@ -201,9 +240,6 @@ void appPublishData() {
     publishEventExample();
     publisher.logStats();
 }
-
-// Publish interval (seconds) for the currently enabled radio. Defined below.
-uint32_t activePublishIntervalS();
 
 // -----------------------------------------------------------------------------
 // Device vitals (diagnostics) push
@@ -274,42 +310,7 @@ static void runPublishTick() {
     }
 }
 
-// Human-readable name of the currently enabled radio.
-const char* activeProfileName() {
-    switch (modem.radioEnabled()) {
-        case RADIO_CELLULAR:  return "Cellular";
-        case RADIO_SATELLITE: return "Satellite";
-        default:              return "None";
-    }
-}
-
-// Is the currently enabled radio connected?
-bool activeRadioConnected() {
-    switch (modem.radioEnabled()) {
-        case RADIO_CELLULAR:  return Particle.connected();
-        case RADIO_SATELLITE: return satellite.connected();
-        default:              return false;
-    }
-}
-
-// Publish interval (seconds) for the currently enabled radio.
-uint32_t activePublishIntervalS() {
-    return (modem.radioEnabled() == RADIO_SATELLITE) ? g_cfg.ntnPublishIntervalS
-                                                     : g_cfg.ltePublishIntervalS;
-}
-
-// Human-readable name for a Device OS cellular access technology.
-const char* accessTechName(hal_net_access_tech_t rat) {
-    switch (rat) {
-        case NET_ACCESS_TECHNOLOGY_GSM:         return "GSM";
-        case NET_ACCESS_TECHNOLOGY_LTE:         return "LTE";
-        case NET_ACCESS_TECHNOLOGY_LTE_CAT_M1:  return "LTE-M";
-        case NET_ACCESS_TECHNOLOGY_LTE_CAT_NB1: return "NB-IoT";
-        default:                                return "unknown";
-    }
-}
-
-void updateConnectionTimers(bool force=false) {
+void updateConnectionTimers() {
     int connected = 0;
     static int lastConnected = -1;
     static radio_type_t lastRadio = RADIO_UNKNOWN;
@@ -374,57 +375,64 @@ void updateConnectionTimers(bool force=false) {
         }
     }
 
+}
+
+// Throttled (5 s) device status line: active profile, app state, time in
+// state, time until next publish, and the active radio's signal / band. Pass
+// force=true to print immediately (e.g. right after a radio switch).
+void logStatusLine(bool force = false) {
     static uint32_t lastCheck = millis();
-    if (force || millis() - lastCheck > 5000) {
-        // Print a status line
-        lastCheck = millis();
-        uint32_t timeInStateS = (millis() - stateEnterTime) / 1000UL;
-
-        char line[256];
-        size_t off = snprintf(line, sizeof(line), "[%s][%s][Time In State: %lus]",
-            activeProfileName(), stateName(appState), (unsigned long)timeInStateS);
-
-        if (off < sizeof(line) && activeRadioConnected()) {
-            uint32_t intervalMs = activePublishIntervalS() * 1000UL;
-            uint32_t sinceLast = millis() - lastPublish;
-            uint32_t untilNextS = (sinceLast >= intervalMs) ? 0 : (intervalMs - sinceLast) / 1000UL;
-            off += snprintf(line + off, sizeof(line) - off,
-                "[Time Until Next Publish: %lus]", (unsigned long)untilNextS);
-        }
-
-        // NTN signal / band, refreshed by satellite.process().
-        if (off < sizeof(line) && modem.radioEnabled() == RADIO_SATELLITE) {
-            auto c = satellite.servingCellInfo();
-            if (c.state[0] != '\0') {
-                if (c.valid) {
-                    off += snprintf(line + off, sizeof(line) - off,
-                        "[Sig: %s band=%d earfcn=%d RSRP=%ddBm RSRQ=%ddB RSSI=%ddBm SINR=%d]",
-                        c.state, c.band, c.earfcn, c.rsrp, c.rsrq, c.rssi, c.sinr);
-                } else {
-                    off += snprintf(line + off, sizeof(line) - off,
-                        "[Sig: %s (acquiring)]", c.state);
-                }
-            }
-        }
-
-        // LTE signal via Device OS (Cellular.RSSI() -> cellular_signal()).
-        // Reports access tech, RSRP (strength) and RSRQ (quality) in real units
-        // plus 0-100% bars. RSSI/SINR are not exposed by this API.
-        if (off < sizeof(line) && modem.radioEnabled() == RADIO_CELLULAR) {
-            CellularSignal sig = Cellular.RSSI();
-            if (sig.isValid()) {
-                off += snprintf(line + off, sizeof(line) - off,
-                    "[Sig: %s RSRP=%.0fdBm RSRQ=%.0fdB Strength=%.0f%% Quality=%.0f%%]",
-                    accessTechName(sig.getAccessTechnology()),
-                    sig.getStrengthValue(), sig.getQualityValue(),
-                    sig.getStrength(), sig.getQuality());
-            } else {
-                off += snprintf(line + off, sizeof(line) - off, "[Sig: no service]");
-            }
-        }
-
-        Log.info("%s", line);
+    if (!force && millis() - lastCheck <= 5000) {
+        return;
     }
+    lastCheck = millis();
+
+    uint32_t timeInStateS = (millis() - stateEnterTime) / 1000UL;
+
+    char line[256];
+    size_t off = snprintf(line, sizeof(line), "[%s][%s][Time In State: %lus]",
+        activeProfileName(), stateName(appState), (unsigned long)timeInStateS);
+
+    if (off < sizeof(line) && activeRadioConnected()) {
+        uint32_t intervalMs = activePublishIntervalS() * 1000UL;
+        uint32_t sinceLast = millis() - lastPublish;
+        uint32_t untilNextS = (sinceLast >= intervalMs) ? 0 : (intervalMs - sinceLast) / 1000UL;
+        off += snprintf(line + off, sizeof(line) - off,
+            "[Time Until Next Publish: %lus]", (unsigned long)untilNextS);
+    }
+
+    // NTN signal / band, refreshed by satellite.process().
+    if (off < sizeof(line) && modem.radioEnabled() == RADIO_SATELLITE) {
+        auto c = satellite.servingCellInfo();
+        if (c.state[0] != '\0') {
+            if (c.valid) {
+                off += snprintf(line + off, sizeof(line) - off,
+                    "[Sig: %s band=%d earfcn=%d RSRP=%ddBm RSRQ=%ddB RSSI=%ddBm SINR=%d]",
+                    c.state, c.band, c.earfcn, c.rsrp, c.rsrq, c.rssi, c.sinr);
+            } else {
+                off += snprintf(line + off, sizeof(line) - off,
+                    "[Sig: %s (acquiring)]", c.state);
+            }
+        }
+    }
+
+    // LTE signal via Device OS (Cellular.RSSI() -> cellular_signal()).
+    // Reports access tech, RSRP (strength) and RSRQ (quality) in real units
+    // plus 0-100% bars. RSSI/SINR are not exposed by this API.
+    if (off < sizeof(line) && modem.radioEnabled() == RADIO_CELLULAR) {
+        CellularSignal sig = Cellular.RSSI();
+        if (sig.isValid()) {
+            off += snprintf(line + off, sizeof(line) - off,
+                "[Sig: %s RSRP=%.0fdBm RSRQ=%.0fdB Strength=%.0f%% Quality=%.0f%%]",
+                accessTechName(sig.getAccessTechnology()),
+                sig.getStrengthValue(), sig.getQualityValue(),
+                sig.getStrength(), sig.getQuality());
+        } else {
+            off += snprintf(line + off, sizeof(line) - off, "[Sig: no service]");
+        }
+    }
+
+    Log.info("%s", line);
 }
 
 void setup()
@@ -453,6 +461,7 @@ void setup()
 void loop()
 {
     updateConnectionTimers();
+    logStatusLine();
 
     switch (appState) {
         // --------------------------------------------------------------------
@@ -468,7 +477,8 @@ void loop()
                 RGB.control(true);
                 RGB.color(0,255,0);
             }
-            updateConnectionTimers(true /* forced log */);
+            updateConnectionTimers();
+            logStatusLine(true /* forced */);
             transitionTo(AppState::AcquireLocation);
             break;
         }
@@ -574,7 +584,8 @@ void loop()
 
             Log.info("RADIO SATELLITE --------------------");
             if (modem.radioEnable(RADIO_SATELLITE) == SYSTEM_ERROR_NONE) {
-                updateConnectionTimers(true /* forced log */);
+                updateConnectionTimers();
+                logStatusLine(true /* forced */);
                 RGB.control(true);
                 RGB.color(0,255,0);
                 transitionTo(AppState::SatelliteConnect);
@@ -596,7 +607,8 @@ void loop()
 
             Log.info("RADIO CELLULAR --------------------");
             if (modem.radioEnable(RADIO_CELLULAR) == SYSTEM_ERROR_NONE) {
-                updateConnectionTimers(true /* forced log */);
+                updateConnectionTimers();
+                logStatusLine(true /* forced */);
                 transitionTo(AppState::CellularConnect);
             } else {
                 Log.error("Failed to enable Cellular radio");

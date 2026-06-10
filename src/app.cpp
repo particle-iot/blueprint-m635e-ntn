@@ -20,6 +20,7 @@
 #include "modem_manager.h"
 #include "app_config.h"
 #include "app_publisher.h"
+#include "diag_query/diag_query.h"
 
 SYSTEM_MODE(SEMI_AUTOMATIC);
 
@@ -49,6 +50,7 @@ static bool stateEntry = true;   // true on the first loop() after a transition
 uint32_t stateEnterTime = 0;     // millis() when the current state was entered
 
 uint32_t lastPublish = 0;
+uint32_t lastVitals = 0;
 uint32_t connectedStartTime = 0;
 uint32_t disconnectedStartTime = 0;
 uint32_t connectedDurationAccum = 0;
@@ -198,6 +200,76 @@ void appPublishData() {
     // publishLocationExample();
     publishEventExample();
     publisher.logStats();
+}
+
+// Publish interval (seconds) for the currently enabled radio. Defined below.
+uint32_t activePublishIntervalS();
+
+// -----------------------------------------------------------------------------
+// Device vitals (diagnostics) push
+// -----------------------------------------------------------------------------
+// Device-initiated vitals: the device gathers Device OS diagnostic sources on
+// its own and publishes them, rather than waiting for the cloud to request
+// specific IDs. It reuses getDiagnosticValue() - the same query primitive the
+// server-pull DiagnosticsRequest path uses - and ships the values as the
+// "vitals" event through the unified publisher (NTN code 2). Like any publish
+// it is subject to the active radio's path, the single NTN rate-limit bucket,
+// and the NTN payload-size cap.
+//
+// Keep kVitalsIds small: every NTN vitals publish must fit ntn_max_payload_size
+// (256 B on-wire) and each entry costs ~key+value bytes after CBOR encoding.
+// Only DIAG_TYPE_INT / DIAG_TYPE_UINT sources can be read; others are skipped.
+static const uint32_t kVitalsIds[] = {
+    DIAG_ID_SYSTEM_UPTIME,                 // sys:uptime (s)
+    DIAG_ID_SYSTEM_BATTERY_CHARGE,         // batt:soc (%)
+    DIAG_ID_SYSTEM_BATTERY_STATE,          // batt:state
+    DIAG_ID_SYSTEM_POWER_SOURCE,           // pwr:src
+    DIAG_ID_SYSTEM_FREE_MEMORY,            // mem:free (B)
+    DIAG_ID_SYSTEM_LAST_RESET_REASON,      // sys:reset
+    DIAG_ID_NETWORK_SIGNAL_STRENGTH,       // net:sigstr (% *100)
+    DIAG_ID_NETWORK_SIGNAL_STRENGTH_VALUE, // net:sigstrv (dBm *100)
+};
+
+// Gather the configured diagnostic IDs into a Variant map keyed by the numeric
+// diag ID (as a string). IDs that cannot be read are skipped.
+static particle::Variant collectVitals() {
+    particle::Variant diag;
+    for (auto id : kVitalsIds) {
+        particle::Variant val;
+        if (getDiagnosticValue(id, val) == 0) {
+            diag.set(String((unsigned)id), val);
+        }
+    }
+    return diag;
+}
+
+static void publishVitals() {
+    // TODO: This is published as a generic event right now, but constrained device
+    // service should be updated to handle these properly as a DIAGNOSTICS message 
+    // and processed the same as non NTN vitals. 
+    particle::Variant vitals;
+    vitals.set("cmd", "vitals");
+    vitals.set("time", (unsigned int)Time.now());
+    vitals.set("diag", collectVitals());
+    publisher.publish("vitals", vitals);
+}
+
+static void runPublishTick() {
+    bool firstPublish = onEntry();
+    uint32_t now = millis();
+
+    if (firstPublish || (now - lastPublish > activePublishIntervalS() * 1000UL)) {
+        appPublishData();
+        lastPublish = now;
+    }
+
+    // Vitals always go out once on connect; periodic refresh only if configured.
+    bool vitalsDue = g_cfg.vitalsIntervalS > 0 &&
+                     (now - lastVitals > g_cfg.vitalsIntervalS * 1000UL);
+    if (firstPublish || vitalsDue) {
+        publishVitals();
+        lastVitals = now;
+    }
 }
 
 // Human-readable name of the currently enabled radio.
@@ -423,10 +495,8 @@ void loop()
                 transitionTo(AppState::SwitchToSatellite);
                 break;
             }
-            if (Particle.connected() &&
-                    (onEntry() || (millis() - lastPublish > g_cfg.ltePublishIntervalS * 1000UL))) {
-                appPublishData();
-                lastPublish = millis();
+            if (Particle.connected()) {
+                runPublishTick();
             }
             break;
         }
@@ -485,10 +555,8 @@ void loop()
                 transitionTo(AppState::SwitchToCellular);
                 break;
             }
-            if (satellite.connected() &&
-                    (onEntry() || (millis() - lastPublish > g_cfg.ntnPublishIntervalS * 1000UL))) {
-                appPublishData();
-                lastPublish = millis();
+            if (satellite.connected()) {
+                runPublishTick();
             }
             break;
         }

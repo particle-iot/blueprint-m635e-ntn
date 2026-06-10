@@ -151,6 +151,7 @@ AppConfig g_cfg = {
     /* startOnCellular                */ false,
     /* ltePublishIntervalS            */ 60,
     /* ntnPublishIntervalS            */ 5 * 60,
+    /* vitalsIntervalS                */ 10 * 60,
     /* ntnMaxPayloadSize              */ 256,
     /* cellularDisconnectedTimeoutS   */ 10 * 60,
     /* satelliteConnectedTimeoutS     */ 10 * 60,
@@ -186,6 +187,7 @@ void loadAppConfig() {
                 applyBool  (v.get("start_on_cellular"),                  g_cfg.startOnCellular,                "start_on_cellular");
                 applyU32   (v.get("lte_publish_interval_s"),             g_cfg.ltePublishIntervalS,            "lte_publish_interval_s");
                 applyU32   (v.get("ntn_publish_interval_s"),             g_cfg.ntnPublishIntervalS,            "ntn_publish_interval_s");
+                applyU32   (v.get("vitals_interval_s"),                  g_cfg.vitalsIntervalS,                "vitals_interval_s");
                 applyU32   (v.get("ntn_max_payload_size"),               g_cfg.ntnMaxPayloadSize,              "ntn_max_payload_size");
                 applyU32   (v.get("cellular_disconnected_timeout_s"),    g_cfg.cellularDisconnectedTimeoutS,   "cellular_disconnected_timeout_s");
                 applyU32   (v.get("satellite_connected_timeout_s"),      g_cfg.satelliteConnectedTimeoutS,     "satellite_connected_timeout_s");
@@ -219,9 +221,10 @@ void loadAppConfig() {
         g_cfg.lteEnabled ? "true" : "false",
         g_cfg.ntnEnabled ? "true" : "false",
         g_cfg.startOnCellular ? "true" : "false");
-    cfgLog.info("  publish: lte=%lus ntn=%lus ntnMaxBytes=%lu",
+    cfgLog.info("  publish: lte=%lus ntn=%lus vitals=%lus ntnMaxBytes=%lu",
         (unsigned long)g_cfg.ltePublishIntervalS,
         (unsigned long)g_cfg.ntnPublishIntervalS,
+        (unsigned long)g_cfg.vitalsIntervalS,
         (unsigned long)g_cfg.ntnMaxPayloadSize);
     cfgLog.info("  switch timeouts: cellDis=%lus satCon=%lus satDis=%lus",
         (unsigned long)g_cfg.cellularDisconnectedTimeoutS,

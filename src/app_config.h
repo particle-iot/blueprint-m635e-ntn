@@ -64,6 +64,12 @@ struct AppConfig {
     uint32_t ltePublishIntervalS;
     uint32_t ntnPublishIntervalS;
 
+    // Device vitals (diagnostics) publish cadence in seconds. Vitals are always
+    // published once on (re)connect; this controls the periodic refresh
+    // afterwards. 0 = on-connect only (no periodic vitals). Shares the active
+    // radio's publish path and, on NTN, the single NTN rate-limit bucket.
+    uint32_t vitalsIntervalS;
+
     // ---- NTN payload cap --------------------------------------------------
     // Max on-wire frame size (header + body) for outbound NTN publishes. The
     // satellite library will reject frames larger than this with

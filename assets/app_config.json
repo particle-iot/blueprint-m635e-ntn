@@ -8,6 +8,7 @@
 
   "lte_publish_interval_s": 60,
   "ntn_publish_interval_s": 300,
+  "vitals_interval_s": 600,
   "ntn_max_payload_size": 256,
 
   "cellular_disconnected_timeout_s": 600,

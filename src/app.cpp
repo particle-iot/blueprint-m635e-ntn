@@ -258,17 +258,19 @@ static void runPublishTick() {
     bool firstPublish = onEntry();
     uint32_t now = millis();
 
-    if (firstPublish || (now - lastPublish > activePublishIntervalS() * 1000UL)) {
-        appPublishData();
-        lastPublish = now;
-    }
-
-    // Vitals always go out once on connect; periodic refresh only if configured.
+    // Vitals: always once on (re)connect, then every vitals_interval_s
     bool vitalsDue = g_cfg.vitalsIntervalS > 0 &&
                      (now - lastVitals > g_cfg.vitalsIntervalS * 1000UL);
     if (firstPublish || vitalsDue) {
         publishVitals();
         lastVitals = now;
+    }
+
+    if (firstPublish) {
+        lastPublish = now;
+    } else if (now - lastPublish > activePublishIntervalS() * 1000UL) {
+        appPublishData();
+        lastPublish = now;
     }
 }
 

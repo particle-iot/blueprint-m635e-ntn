@@ -116,7 +116,6 @@ int Satellite::cbQIRD(int type, const char* buf, int len, char* outBuf) {
     // Log.info("ret: %d incomingPacketLength: %d", ret, incomingPacketLength);
   } else if(outBuf) {
     // skip the leading "\r\n" in the response and copy the hex data to outBuf for processing
-    Log.info("%x %x %x %x", buf[0], buf[1], buf[2], buf[3]);
     memcpy(outBuf, &buf[2], incomingPacketLength);
     incomingPacketLength = 0;
   }
@@ -170,6 +169,9 @@ int Satellite::cbQENG(int type, const char* buf, int len, NtnServingCellInfo* in
     }
     NtnServingCellInfo p;
     // state, rat, duplex are quoted; cellId and tac are hex; the rest decimal.
+    // +QENG: "servingcell","SEARCH"
+    // +QENG: "servingcell","LIMSRV","NTN NBIoT","FDD",901,98,DC379,9,7685,23,0,0,7D9,-123,-14,-108,85,17
+    // +QENG: "servingcell","CONNECT","NTN NBIoT","FDD",901,98,DC379,9,7685,23,0,0,7D9,-126,-18,-107,75,
     int n = sscanf(buf,
             "\r\n+QENG: \"servingcell\",\"%11[^\"]\",\"%15[^\"]\",\"%7[^\"]\",%d,%d,%x,%d,%d,%d,%d,%d,%x,%d,%d,%d,%d,%d",
             p.state, p.rat, p.duplex, &p.mcc, &p.mnc, &p.cellId, &p.pcid, &p.earfcn,

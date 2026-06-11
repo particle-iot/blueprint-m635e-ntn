@@ -51,11 +51,8 @@ uint32_t stateEnterTime = 0;     // millis() when the current state was entered
 
 uint32_t lastPublish = 0;
 uint32_t lastVitals = 0;
-uint32_t connectedStartTime = 0;
-uint32_t disconnectedStartTime = 0;
-uint32_t connectedDurationAccum = 0;
-uint32_t disconnectedDurationAccum = 0;
-uint32_t radioTime = 0;
+uint32_t radioTime = 0;        // millis() when the current radio was enabled
+uint32_t connStateSince = 0;   // millis() when the current connected/disconnected state began
 
 // Location used for outgoing publishes (decimal degrees / metres). Populated
 // from a GPS fix or the fixed fallback; reused until refreshed.
@@ -103,7 +100,10 @@ bool cellularShouldSwitchToSatellite() {
     if (g_cfg.forceCellularToSatelliteSwitch) {
         return radioTime && (millis() - radioTime > g_cfg.forceC2sSwitchTimeoutS * 1000UL);
     }
-    return disconnectedStartTime && (millis() - disconnectedStartTime > g_cfg.cellularDisconnectedTimeoutS * 1000UL);
+    // Switch only after we have been continuously disconnected on LTE for the
+    // timeout. connStateSince resets on connect, so it can't go stale.
+    return !Particle.connected() &&
+           (millis() - connStateSince > g_cfg.cellularDisconnectedTimeoutS * 1000UL);
 }
 
 // Should we leave Satellite for Cellular? We don't camp on Satellite if Cellular
@@ -116,8 +116,13 @@ bool satelliteShouldSwitchToCellular() {
     if (g_cfg.forceSatelliteToCellularSwitch) {
         return radioTime && (millis() - radioTime > g_cfg.forceS2cSwitchTimeoutS * 1000UL);
     }
-    return (disconnectedStartTime && (millis() - disconnectedStartTime > g_cfg.satelliteDisconnectedTimeoutS * 1000UL)) ||
-           (connectedStartTime && (millis() - connectedStartTime > g_cfg.satelliteConnectedTimeoutS * 1000UL));
+    // Apply the timeout for the state we are actually in, measured from the last
+    // connect/disconnect flip: switch after satelliteConnectedTimeoutS connected
+    // (periodically retry LTE) or satelliteDisconnectedTimeoutS disconnected.
+    uint32_t inStateMs = millis() - connStateSince;
+    return satellite.connected()
+        ? (inStateMs > g_cfg.satelliteConnectedTimeoutS * 1000UL)
+        : (inStateMs > g_cfg.satelliteDisconnectedTimeoutS * 1000UL);
 }
 
 // Acquire the location to program into the modem's NTN location fix, then hand
@@ -262,6 +267,8 @@ static const uint32_t kVitalsIds[] = {
     DIAG_ID_SYSTEM_POWER_SOURCE,           // pwr:src
     DIAG_ID_SYSTEM_FREE_MEMORY,            // mem:free (B)
     DIAG_ID_SYSTEM_LAST_RESET_REASON,      // sys:reset
+    DIAG_ID_SYSTEM_VERSION,               // sys:version
+    DIAG_ID_SYSTEM_USER_PART_HASH,        // sys:userphash
     DIAG_ID_NETWORK_SIGNAL_STRENGTH,       // net:sigstr (% *100)
     DIAG_ID_NETWORK_SIGNAL_STRENGTH_VALUE, // net:sigstrv (dBm *100)
 };
@@ -310,71 +317,30 @@ static void runPublishTick() {
     }
 }
 
+// Tracks how long the active radio has been continuously connected or
+// disconnected. `connStateSince` is the millis() timestamp of the most recent
+// connected<->disconnected flip (or radio switch); the switch-decision helpers
+// compare millis() - connStateSince against the configured timeouts. A radio
+// switch restarts both this clock and `radioTime` (used by the force paths).
 void updateConnectionTimers() {
-    int connected = 0;
-    static int lastConnected = -1;
     static radio_type_t lastRadio = RADIO_UNKNOWN;
+    static bool lastConnected = false;
+
     radio_type_t radio = modem.radioEnabled();
+    bool connected = activeRadioConnected();
 
-    if (radio == RADIO_CELLULAR) {
-        if (Particle.connected()) {
-            connected = 1;
-        }
-    } else if (radio == RADIO_SATELLITE) {
-        if (satellite.connected()) {
-            connected = 1;
-        }
-    }
-
-    // reset timers on radio change only
-    if (lastRadio != radio) {
-        connectedStartTime = 0;
-        disconnectedStartTime = 0;
-        connectedDurationAccum = 0;
-        disconnectedDurationAccum = 0;
-        lastConnected = -1;
-        radioTime = millis();
+    if (radio != lastRadio) {
         lastRadio = radio;
-    }
-
-    // make sure these are equal on first run
-    if (lastConnected == -1) {
         lastConnected = connected;
+        radioTime = millis();
+        connStateSince = millis();
+        return;
     }
 
-    // accumulate connected/disconnected time only
-    if (connected) {
-        if (lastConnected != connected) {
-            // save disconnectedDurationAccum if we just switched from disconnected to connected
-            if (disconnectedStartTime) {
-                disconnectedDurationAccum = millis() - disconnectedStartTime;
-            }
-            // add any connected time accumulated
-            if (connectedDurationAccum) {
-                connectedStartTime = millis() - connectedDurationAccum;
-            }
-            lastConnected = connected;
-        }
-        if (!connectedStartTime) {
-            connectedStartTime = millis();
-        }
-    } else {
-        if (lastConnected != connected) {
-            if (connectedStartTime) {
-                // save connectedDurationAccum if we just switched from connected to disconnected
-                connectedDurationAccum = millis() - connectedStartTime;
-            }
-            if (disconnectedDurationAccum) {
-                // add any disconnected time accumulated
-                disconnectedStartTime = millis() - disconnectedDurationAccum;
-            }
-            lastConnected = connected;
-        }
-        if (!disconnectedStartTime) {
-            disconnectedStartTime = millis();
-        }
+    if (connected != lastConnected) {
+        lastConnected = connected;
+        connStateSince = millis();
     }
-
 }
 
 // Throttled (5 s) device status line: active profile, app state, time in

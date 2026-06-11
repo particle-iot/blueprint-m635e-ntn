@@ -13,7 +13,7 @@
 
   "cellular_disconnected_timeout_s": 600,
   "satellite_connected_timeout_s": 600,
-  "satellite_disconnected_timeout_s": 60,
+  "satellite_disconnected_timeout_s": 600,
 
   "force_cellular_to_satellite_switch": false,
   "force_satellite_to_cellular_switch": false,

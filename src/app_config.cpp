@@ -155,7 +155,7 @@ AppConfig g_cfg = {
     /* ntnMaxPayloadSize              */ 256,
     /* cellularDisconnectedTimeoutS   */ 10 * 60,
     /* satelliteConnectedTimeoutS     */ 10 * 60,
-    /* satelliteDisconnectedTimeoutS  */ 60,
+    /* satelliteDisconnectedTimeoutS  */ 10 * 60,
     /* forceCellularToSatelliteSwitch */ false,
     /* forceSatelliteToCellularSwitch */ false,
     /* forceC2sSwitchTimeoutS         */ 10 * 60,

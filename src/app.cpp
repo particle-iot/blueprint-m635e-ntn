@@ -409,9 +409,9 @@ void setup()
     pinMode(D7, OUTPUT);
     digitalWrite(D7, LOW);
 
-    // Load runtime config from the bundled app_config.json asset before
-    // anything else reads g_cfg. Missing/invalid asset falls back to the
-    // compiled defaults in app_config.cpp.
+    // Load config from the env.json environment variables before anything else
+    // reads g_cfg. Missing/invalid variables fall back to the compiled defaults
+    // in app_config.cpp.
     loadAppConfig();
 
     satellite.setMaxPayloadSize(g_cfg.ntnMaxPayloadSize);

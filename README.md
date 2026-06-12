@@ -45,7 +45,7 @@ An always-on satellite (NTN) demonstration blueprint for the Particle M635e plat
 
 1. Download this blueprint from github and open in Particle Workbench
 2. Select M-SoM as the device type and then compile and upload the program by plugging in the device to your computer over USB
-3. Modify the `assets/app_config.json` parameters to update if you are publishing from cellular, satellite or both!
+3. Modify the `env.json` parameters to update if you are publishing from cellular, satellite or both!
 
 On every boot the application resets to LTE-first mode internally (if enabled), resets all timers and the state machine, enables the watchdog, and reinitialises the modem.
 
@@ -59,30 +59,27 @@ NTN connectivity is highly sensitive to antenna selection and placement:
 
 ## Configuration
 
-All runtime behaviour is defined in a single top-level configuration file under `assets/app_config.json`:
+All runtime behaviour is defined in a single top-level `env.json` file. Workbench builds each key/value pair into the application binary as an environment variable, and the firmware reads them at boot (see `src/app_config.cpp`). Any variable that is missing or invalid falls back to the compiled default in `src/app_config.cpp`.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `feature_lte_enabled` | bool | `true` | Allow LTE-M as a connectivity stack. |
-| `feature_ntn_enabled` | bool | `true` | Allow Satellite NTN as a connectivity stack. At least one of the two `feature_*_enabled` flags must be true; LTE will be enabled if both are false. |
-| `start_on_cellular` | bool | `false` | Which radio the device boots on. `true` = LTE-M; `false` = NTN (useful for NTN-first demos). |
-| `lte_publish_interval_s` | uint | `60` | Seconds between publishes while on LTE-M. |
-| `ntn_publish_interval_s` | uint | `300` | Seconds between publishes while on NTN. Do not set below `10`. Also the size of the single NTN rate-limit bucket shared by every NTN message. |
-| `vitals_interval_s` | uint | `600` | Seconds between periodic device-vitals publishes. Vitals are always published once on (re)connect regardless of this value; `0` disables the periodic refresh (on-connect only). |
-| `cellular_disconnected_timeout_s` | uint | `600` | Seconds disconnected on LTE before switching to Satellite. There is no cellular "connected" timeout — if LTE is up, we stay. Don't set below 600 for production. |
-| `satellite_connected_timeout_s` | uint | `600` | Seconds connected on Satellite before switching back to test Cellular again. Don't set below 600 for production. |
-| `satellite_disconnected_timeout_s` | uint | `600` | Seconds disconnected on Satellite (including while still acquiring — SEARCH/LIMSRV before attach) before switching back to Cellular. NTN attach can take minutes, so don't set this too low or the device gives up before it ever connects. |
-| `force_cellular_to_satellite_switch` | bool | `false` | Bench testing only. When true, the LTE→NTN switch fires purely on `force_c2s_switch_timeout_s` after radio enable, ignoring LTE connection state. |
-| `force_satellite_to_cellular_switch` | bool | `false` | Bench testing only. When true, the NTN→LTE switch fires purely on `force_s2c_switch_timeout_s` after radio enable, ignoring NTN connection state. |
-| `force_c2s_switch_timeout_s` | uint | `600` | Force-mode timeout for the LTE→NTN switch. Ignored unless `force_cellular_to_satellite_switch` is true. |
-| `force_s2c_switch_timeout_s` | uint | `600` | Force-mode timeout for the NTN→LTE switch. Ignored unless `force_satellite_to_cellular_switch` is true. |
-| `loc_source` | string | `"fixed"` | Where the NTN location fix (programmed via `AT+QNWCFG="ntn_locfix",...` before registration) comes from. `"fixed"` = use the `loc_fixed_*` coords below; never query the GNSS engine (no-antenna devices). `"dynamic"` = try the modem's GNSS engine for up to `loc_gps_fix_timeout_s`, then fall back to the fixed coords. |
-| `loc_gps_fix_timeout_s` | uint | `60` | Maximum seconds to wait for a GNSS fix in `dynamic` mode before giving up and using the fixed coords. Unused in `fixed` mode. |
-| `loc_fixed_latitude` | double | `44.92653` | Fixed latitude in decimal degrees. Used in `fixed` mode and as the fallback in `dynamic` mode. |
-| `loc_fixed_longitude` | double | `-93.39767` | Fixed longitude in decimal degrees. |
-| `loc_fixed_altitude` | double | `283.0` | Fixed altitude in metres. |
-
-All options are documented inline in the config file.
+| `FEATURE_LTE_ENABLED` | bool | `true` | Allow LTE-M as a connectivity stack. |
+| `FEATURE_NTN_ENABLED` | bool | `true` | Allow Satellite NTN as a connectivity stack. At least one of the two `FEATURE_*_ENABLED` flags must be true; LTE will be enabled if both are false. |
+| `START_ON_CELLULAR` | bool | `false` | Which radio the device boots on. `true` = LTE-M; `false` = NTN (useful for NTN-first demos). |
+| `LTE_PUBLISH_INTERVAL_S` | uint | `60` | Seconds between publishes while on LTE-M. |
+| `NTN_PUBLISH_INTERVAL_S` | uint | `300` | Seconds between publishes while on NTN. Do not set below `30`. |
+| `VITALS_INTERVAL_S` | uint | `600` | Seconds between periodic device-vitals publishes. Vitals are always published once on (re)connect regardless of this value; `0` disables the periodic refresh (on-connect only). |
+| `NTN_MAX_PAYLOAD_SIZE` | uint | `256` | Max on-wire frame size (header + body) for outbound NTN publishes. |
+| `CELLULAR_DISCONNECTED_TIMEOUT_S` | uint | `600` | Seconds disconnected on LTE before switching to Satellite. There is no cellular "connected" timeout — if LTE is up, we stay. |
+| `SATELLITE_CONNECTED_TIMEOUT_S` | uint | `600` | Seconds connected on Satellite before switching back to test Cellular again. |
+| `SATELLITE_DISCONNECTED_TIMEOUT_S` | uint | `600` | Seconds disconnected on Satellite (including while still acquiring — SEARCH/LIMSRV before attach) before switching back to Cellular. NTN attach can take minutes, so don't set this too low or the device gives up before it ever connects. |
+| `FORCE_CELLULAR_TO_SATELLITE_SWITCH` | bool | `false` | Bench testing only. When true, the LTE→NTN switch fires purely on `FORCE_C2S_SWITCH_TIMEOUT_S` after radio enable, ignoring LTE connection state. |
+| `FORCE_SATELLITE_TO_CELLULAR_SWITCH` | bool | `false` | Bench testing only. When true, the NTN→LTE switch fires purely on `FORCE_S2C_SWITCH_TIMEOUT_S` after radio enable, ignoring NTN connection state. |
+| `FORCE_C2S_SWITCH_TIMEOUT_S` | uint | `600` | Force-mode timeout for the LTE→NTN switch. Ignored unless `FORCE_CELLULAR_TO_SATELLITE_SWITCH` is true. |
+| `FORCE_S2C_SWITCH_TIMEOUT_S` | uint | `600` | Force-mode timeout for the NTN→LTE switch. Ignored unless `FORCE_SATELLITE_TO_CELLULAR_SWITCH` is true. |
+| `LOC_SOURCE` | string | `"fixed"` | Where the NTN location fix comes from. `"fixed"` = use the `PARTICLE_LOCATION_FIXED` coords below; never query the GNSS engine (no-antenna devices). `"dynamic"` = try the modem's GNSS engine for up to `LOC_GPS_FIX_TIMEOUT_S`, then fall back to those coords. |
+| `LOC_GPS_FIX_TIMEOUT_S` | uint | `60` | Maximum seconds to wait for a GNSS fix in `dynamic` mode before giving up and using the fixed coords. Unused in `fixed` mode. |
+| `PARTICLE_LOCATION_FIXED` | string | `"44.92653,-93.39767,283.0"` | Fixed location as `"<latitude>,<longitude>,<altitude>"` in decimal degrees / meters. Used directly in `fixed` mode and as the fallback in `dynamic` mode. |
 
 ### Example Configurations
 
@@ -147,11 +144,10 @@ This layer centralises rate limiting (1 message / 30 s on NTN), payload sizing (
 
 ### Location Handling
 
-NTN attach requires location. Sources, in order of preference:
+NTN attach requires location. `LOC_SOURCE` selects how it is obtained:
 
-1. The `PARTICLE_LOCATION_FIXED` environment variable containing a string with `lat,long,altitude`
-2. Hard-coded coordinates in `assets/app_config.json`
-3. GPS integrated into the application, enabled by setting `loc_source` to `dynamic` 
+1. `fixed` — use the `PARTICLE_LOCATION_FIXED` coordinates (`"lat,long,altitude"`) directly; the GNSS engine is never queried (no-antenna devices).
+2. `dynamic` — try the integrated GPS for up to `LOC_GPS_FIX_TIMEOUT_S`, then fall back to the `PARTICLE_LOCATION_FIXED` coordinates if no fix is obtained.
 
 Acquired location is cached and reused on each NTN attach attempt.
 

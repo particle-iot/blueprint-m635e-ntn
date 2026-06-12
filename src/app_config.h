@@ -22,10 +22,11 @@
 // =============================================================================
 // M635E NTN Blueprint Demo - Application Configuration
 // =============================================================================
-// Runtime configuration loaded from the bundled Particle Asset
-// `assets/app_config.json`. Call loadAppConfig() once during setup() before any
-// component that reads g_cfg. If the asset is missing or any field is invalid,
-// the defaults defined in src/app_config.cpp are used.
+// Build-time configuration sourced from environment variables defined in the
+// top-level `env.json` Call
+// loadAppConfig() once during setup() before any component that reads g_cfg. If
+// a variable is missing or invalid, the default defined in src/app_config.cpp
+// is used for that field.
 //
 // Conventions:
 //   *_S values are seconds. Convert at the call site if a Device OS API needs
@@ -118,7 +119,7 @@ struct AppConfig {
 // the defaults from src/app_config.cpp.
 extern AppConfig g_cfg;
 
-// Populate g_cfg from the bundled `app_config.json` asset. Missing asset or
-// invalid JSON leaves the defaults in place; individual missing/invalid fields
-// keep their default. Call once, early in setup().
+// Populate g_cfg from the `env.json` environment variables. Each missing or
+// invalid variable leaves that field's compiled default in place. Call once,
+// early in setup().
 void loadAppConfig();

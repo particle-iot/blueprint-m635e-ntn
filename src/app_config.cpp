@@ -17,59 +17,55 @@
 
 #include "app_config.h"
 
-#include <vector>
-
 namespace {
 Logger cfgLog("app.cfg");
 
-constexpr const char* kAssetName = "app_config.json";
+// Each setting is sourced from a build-time environment variable defined in the
+// top-level `env.json`. Workbench builds these into the application
+// binary; we read them back with System.getEnv() at boot.
+//
+// The apply*Env() helpers all share the same contract: they overwrite `dest`
+// only when the variable is present AND parses to a valid value of the right
+// type, leaving the compiled default in place otherwise. A present-but-invalid
+// value is logged and ignored.
 
-// Apply `value` to `dest` only if the variant carries a value of the right
-// kind. Numeric coercion follows JSON's loose semantics (a JSON integer is
-// accepted for a double field, but a string is not).
-void applyBool(const Variant& v, bool& dest, const char* key) {
-    if (v.isBool()) {
-        dest = v.toBool();
-    } else if (!v.isNull()) {
-        cfgLog.warn("config field '%s' is not a bool; using default", key);
+// Bool: the getEnv(bool&) overload validates the value is exactly "true" or
+// "false" and only writes on success.
+void applyBoolEnv(const char* key, bool& dest) {
+    bool v = false;
+    if (System.getEnv(key, v)) {
+        dest = v;
+    } else if (System.hasEnv(key)) {
+        cfgLog.warn("env '%s' is not 'true'/'false'; using default", key);
     }
 }
 
-void applyU32(const Variant& v, uint32_t& dest, const char* key) {
-    if (v.isNumber()) {
-        // toInt() returns int; for the values we use here (intervals/timeouts
-        // up to ~hours of ms) the JSON number is always well under INT32_MAX.
-        auto n = v.toInt();
-        if (n < 0) {
-            cfgLog.warn("config field '%s' is negative; using default", key);
+// Unsigned: the getEnv(int&) overload validates a signed 32-bit decimal integer
+// and only writes on success. We additionally reject negatives.
+void applyU32Env(const char* key, uint32_t& dest) {
+    int v = 0;
+    if (System.getEnv(key, v)) {
+        if (v < 0) {
+            cfgLog.warn("env '%s' is negative; using default", key);
             return;
         }
-        dest = static_cast<uint32_t>(n);
-    } else if (!v.isNull()) {
-        cfgLog.warn("config field '%s' is not a number; using default", key);
+        dest = static_cast<uint32_t>(v);
+    } else if (System.hasEnv(key)) {
+        cfgLog.warn("env '%s' is not a valid integer; using default", key);
     }
 }
 
-void applyDouble(const Variant& v, double& dest, const char* key) {
-    if (v.isNumber()) {
-        dest = v.toDouble();
-    } else if (!v.isNull()) {
-        cfgLog.warn("config field '%s' is not a number; using default", key);
+void applyLocSourceEnv(const char* key, LocSource& dest) {
+    String s;
+    if (!System.getEnv(key, s)) {
+        return; // not present
     }
-}
-
-void applyLocSource(const Variant& v, LocSource& dest, const char* key) {
-    if (v.isString()) {
-        String s = v.toString();
-        if (s.equalsIgnoreCase("fixed")) {
-            dest = LocSource::Fixed;
-        } else if (s.equalsIgnoreCase("dynamic")) {
-            dest = LocSource::Dynamic;
-        } else {
-            cfgLog.warn("config field '%s'='%s' unrecognised; using default", key, s.c_str());
-        }
-    } else if (!v.isNull()) {
-        cfgLog.warn("config field '%s' is not a string; using default", key);
+    if (s.equalsIgnoreCase("fixed")) {
+        dest = LocSource::Fixed;
+    } else if (s.equalsIgnoreCase("dynamic")) {
+        dest = LocSource::Dynamic;
+    } else {
+        cfgLog.warn("env '%s'='%s' unrecognised; using default", key, s.c_str());
     }
 }
 
@@ -81,70 +77,29 @@ const char* locSourceName(LocSource s) {
     return "?";
 }
 
-// Optional Particle environment variable that overrides the fixed GNSS
-// location. Format: "<latitude>,<longitude>,<altitude>" in decimal degrees /
-// metres (e.g. "44.92653,-93.39767,283.0"). When present and well-formed it
-// replaces loc_fixed_latitude / longitude / altitude from the JSON asset.
 constexpr const char* kEnvLocationFixed = "PARTICLE_LOCATION_FIXED";
 
 void applyFixedLocationEnv() {
     String val;
     if (!System.getEnv(kEnvLocationFixed, val)) {
-        return; // not defined; keep JSON/default values
+        return; // not defined; keep compiled default coordinates
     }
     double lat = 0, lon = 0, alt = 0;
     if (sscanf(val.c_str(), "%lf,%lf,%lf", &lat, &lon, &alt) != 3) {
-        cfgLog.warn("env '%s'='%s' not in '<lat>,<lon>,<alt>' form; ignoring",
+        cfgLog.warn("env '%s'='%s' not in '<lat>,<lon>,<alt>' form; using defaults",
             kEnvLocationFixed, val.c_str());
         return;
     }
     g_cfg.locFixedLatitude = lat;
     g_cfg.locFixedLongitude = lon;
     g_cfg.locFixedAltitude = alt;
-    cfgLog.info("env '%s' overrides fixed location: (%f, %f, %f)",
+    cfgLog.info("env '%s' sets fixed location: (%f, %f, %f)",
         kEnvLocationFixed, lat, lon, alt);
-
-    // The env var supplies a static location, so force Fixed mode: the GNSS
-    // engine is never queried and these coordinates are always used.
-    if (g_cfg.locSource == LocSource::Dynamic) {
-        cfgLog.warn("env '%s' present; forcing loc_source fixed (was dynamic)",
-            kEnvLocationFixed);
-    }
-    g_cfg.locSource = LocSource::Fixed;
-}
-
-// Find the bundled asset by name. Returns an empty (invalid) asset if not
-// present.
-ApplicationAsset findAsset(const char* name) {
-    auto assets = System.assetsAvailable();
-    for (auto& a : assets) {
-        if (a.name() == name) {
-            return a;
-        }
-    }
-    return ApplicationAsset();
-}
-
-// Read the full asset body into a null-terminated buffer. Returns empty
-// String on any error.
-String readAssetText(ApplicationAsset& asset) {
-    const size_t sz = asset.size();
-    if (sz == 0) {
-        return String();
-    }
-    std::vector<char> buf(sz + 1, '\0');
-    asset.reset();
-    int n = asset.read(buf.data(), sz);
-    if (n < 0 || static_cast<size_t>(n) != sz) {
-        cfgLog.warn("asset '%s' short read: got %d of %u bytes", asset.name().c_str(), n, (unsigned)sz);
-        return String();
-    }
-    return String(buf.data());
 }
 } // namespace
 
 
-// Defaults so the device boots correctly even if the asset is absent or malformed.
+// Defaults so the device boots correctly even if no env vars are set.
 AppConfig g_cfg = {
     /* lteEnabled                     */ true,
     /* ntnEnabled                     */ true,
@@ -169,45 +124,28 @@ AppConfig g_cfg = {
 
 
 void loadAppConfig() {
-    auto asset = findAsset(kAssetName);
-    if (!asset.isValid()) {
-        cfgLog.warn("asset '%s' not present; using compiled defaults", kAssetName);
-    } else {
-        String json = readAssetText(asset);
-        if (json.length() == 0) {
-            cfgLog.warn("asset '%s' empty/unreadable; using compiled defaults", kAssetName);
-        } else {
-            auto v = Variant::fromJSON(json.c_str());
-            if (!v.isMap()) {
-                cfgLog.warn("asset '%s' is not a JSON object; using compiled defaults", kAssetName);
-            } else {
-                cfgLog.info("loading config from asset '%s' (%u bytes)", kAssetName, (unsigned)asset.size());
-                applyBool  (v.get("feature_lte_enabled"),                g_cfg.lteEnabled,                     "feature_lte_enabled");
-                applyBool  (v.get("feature_ntn_enabled"),                g_cfg.ntnEnabled,                     "feature_ntn_enabled");
-                applyBool  (v.get("start_on_cellular"),                  g_cfg.startOnCellular,                "start_on_cellular");
-                applyU32   (v.get("lte_publish_interval_s"),             g_cfg.ltePublishIntervalS,            "lte_publish_interval_s");
-                applyU32   (v.get("ntn_publish_interval_s"),             g_cfg.ntnPublishIntervalS,            "ntn_publish_interval_s");
-                applyU32   (v.get("vitals_interval_s"),                  g_cfg.vitalsIntervalS,                "vitals_interval_s");
-                applyU32   (v.get("ntn_max_payload_size"),               g_cfg.ntnMaxPayloadSize,              "ntn_max_payload_size");
-                applyU32   (v.get("cellular_disconnected_timeout_s"),    g_cfg.cellularDisconnectedTimeoutS,   "cellular_disconnected_timeout_s");
-                applyU32   (v.get("satellite_connected_timeout_s"),      g_cfg.satelliteConnectedTimeoutS,     "satellite_connected_timeout_s");
-                applyU32   (v.get("satellite_disconnected_timeout_s"),   g_cfg.satelliteDisconnectedTimeoutS,  "satellite_disconnected_timeout_s");
-                applyBool  (v.get("force_cellular_to_satellite_switch"), g_cfg.forceCellularToSatelliteSwitch, "force_cellular_to_satellite_switch");
-                applyBool  (v.get("force_satellite_to_cellular_switch"), g_cfg.forceSatelliteToCellularSwitch, "force_satellite_to_cellular_switch");
-                applyU32   (v.get("force_c2s_switch_timeout_s"),         g_cfg.forceC2sSwitchTimeoutS,         "force_c2s_switch_timeout_s");
-                applyU32   (v.get("force_s2c_switch_timeout_s"),         g_cfg.forceS2cSwitchTimeoutS,         "force_s2c_switch_timeout_s");
-                applyLocSource(v.get("loc_source"),                      g_cfg.locSource,                      "loc_source");
-                applyU32   (v.get("loc_gps_fix_timeout_s"),              g_cfg.locGpsFixTimeoutS,              "loc_gps_fix_timeout_s");
-                applyDouble(v.get("loc_fixed_latitude"),                 g_cfg.locFixedLatitude,               "loc_fixed_latitude");
-                applyDouble(v.get("loc_fixed_longitude"),                g_cfg.locFixedLongitude,              "loc_fixed_longitude");
-                applyDouble(v.get("loc_fixed_altitude"),                 g_cfg.locFixedAltitude,               "loc_fixed_altitude");
-            }
-        }
-    }
+    // Source every setting from its environment variable (env.json). Each helper
+    // leaves the compiled default in place when the variable is absent or
+    // invalid, so the device always boots with a usable configuration.
+    applyBoolEnv     ("FEATURE_LTE_ENABLED",                g_cfg.lteEnabled);
+    applyBoolEnv     ("FEATURE_NTN_ENABLED",                g_cfg.ntnEnabled);
+    applyBoolEnv     ("START_ON_CELLULAR",                  g_cfg.startOnCellular);
+    applyU32Env      ("LTE_PUBLISH_INTERVAL_S",             g_cfg.ltePublishIntervalS);
+    applyU32Env      ("NTN_PUBLISH_INTERVAL_S",             g_cfg.ntnPublishIntervalS);
+    applyU32Env      ("VITALS_INTERVAL_S",                  g_cfg.vitalsIntervalS);
+    applyU32Env      ("NTN_MAX_PAYLOAD_SIZE",               g_cfg.ntnMaxPayloadSize);
+    applyU32Env      ("CELLULAR_DISCONNECTED_TIMEOUT_S",    g_cfg.cellularDisconnectedTimeoutS);
+    applyU32Env      ("SATELLITE_CONNECTED_TIMEOUT_S",      g_cfg.satelliteConnectedTimeoutS);
+    applyU32Env      ("SATELLITE_DISCONNECTED_TIMEOUT_S",   g_cfg.satelliteDisconnectedTimeoutS);
+    applyBoolEnv     ("FORCE_CELLULAR_TO_SATELLITE_SWITCH", g_cfg.forceCellularToSatelliteSwitch);
+    applyBoolEnv     ("FORCE_SATELLITE_TO_CELLULAR_SWITCH", g_cfg.forceSatelliteToCellularSwitch);
+    applyU32Env      ("FORCE_C2S_SWITCH_TIMEOUT_S",         g_cfg.forceC2sSwitchTimeoutS);
+    applyU32Env      ("FORCE_S2C_SWITCH_TIMEOUT_S",         g_cfg.forceS2cSwitchTimeoutS);
+    applyLocSourceEnv("LOC_SOURCE",                         g_cfg.locSource);
+    applyU32Env      ("LOC_GPS_FIX_TIMEOUT_S",              g_cfg.locGpsFixTimeoutS);
 
-    // Optional env override for the fixed location, applied after the JSON
-    // asset so it takes precedence over loc_fixed_* and is reflected in the
-    // config dump below.
+    // Fixed coordinates come as a single "lat,lon,alt" value (decimal degrees /
+    // metres). Used directly in fixed mode and as the dynamic-mode fallback.
     applyFixedLocationEnv();
 
     // At least one stack must be enabled.

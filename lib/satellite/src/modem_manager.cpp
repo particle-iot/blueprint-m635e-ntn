@@ -94,6 +94,7 @@ namespace {
 #define NOTIFICATIONS_MAX        (8)             // notifications parsed per ListNotification pass
 #define NOTIF_SWEEP_PASSES       (8)             // list+delete rounds; one GET RESPONSE holds ~4 entries
 
+#define TERMINAL_CAPABILITY_APDU "80AA000005A903830107"  // A9/83 eUICC capabilities = LPAd present
 #define CPIN_CODE_MAX            (16)            // longest +CPIN: code is "SIM PUK2", +1 for NUL
 #define SIM_READY_POLL_MS        (1000)          // matches device-os CHECK_SIM_CARD_INTERVAL
 #define SIM_READY_TIMEOUT_MS     (10000)         // matches CHECK_SIM_CARD_ATTEMPTS * INTERVAL
@@ -190,7 +191,7 @@ int ModemManager::waitForSimReady(unsigned int timeoutMs) {
         delay(SIM_READY_POLL_MS);
     } while (millis() - start < timeoutMs);
 
-    Log.error("SIM not ready %u ms after REFRESH", timeoutMs);
+    Log.error("SIM not ready after %u ms", timeoutMs);
     return SYSTEM_ERROR_TIMEOUT;
 }
 
@@ -354,6 +355,7 @@ int ModemManager::simGpCla() {
 
 int ModemManager::openSimChannel() {
     // MANAGE CHANNEL (open) then SELECT the ISD-R applet on that channel
+    sendTerminalCapability(); // must precede the open + SELECT after any card reset
     simChannel_ = -1;
     memset(&csimResponse, 0, sizeof(csimResponse));
     int r = Cellular.command(cbCSIMstring, csimResponse, 10000, "AT+CSIM=10,\"0070000000\"");
@@ -623,6 +625,30 @@ int ModemManager::esimClearNotifications() {
     return deleted;
 }
 
+int ModemManager::sendTerminalCapability() {
+    // Kigen requires this to keep LPAe off. The card forgets it on every reset and it must
+    // precede MANAGE CHANNEL + SELECT ISD-R, so every path that brings the card up re-sends it.
+    int cfunVal = -1;
+    Cellular.command(cbCFUN, &cfunVal, 10000, "AT+CFUN?");
+    if (cfunVal != 1) {
+        // Card is powered down, so it cannot be told anything; the next card-up path re-sends.
+        return SYSTEM_ERROR_INVALID_STATE;
+    }
+    if (waitForSimReady(SIM_READY_TIMEOUT_MS) != RESP_OK) {
+        return SYSTEM_ERROR_TIMEOUT;
+    }
+
+    memset(&csimResponse, 0, sizeof(csimResponse));
+    int r = Cellular.command(cbCSIMstring, csimResponse, 10000,
+            "AT+CSIM=20,\"" TERMINAL_CAPABILITY_APDU "\"");
+    if (r != RESP_OK || strcmp(csimResponse, "9000") != 0) {
+        Log.error("TERMINAL CAPABILITY failed (%d, \"%s\"); LPAe may still be enabled", r, csimResponse);
+        return SYSTEM_ERROR_PROTOCOL;
+    }
+    Log.trace("TERMINAL CAPABILITY accepted; LPAe disabled");
+    return SYSTEM_ERROR_NONE;
+}
+
 int ModemManager::refreshModem(int radioType) {
     // Single modem power cycle so it re-reads the now-active eUICC profile.
     // Sets iotopmode while powered down, unless RADIO_UNKNOWN was specified.
@@ -634,6 +660,7 @@ int ModemManager::refreshModem(int radioType) {
     }
     Cellular.command(180000, "AT+CFUN=1");
     waitAtResponse(10);
+    sendTerminalCapability();
     return 0;
 }
 
@@ -1018,6 +1045,8 @@ int ModemManager::begin() {
     waitAtResponse(5); // Check if the module is alive
 
     Cellular.command(2000, "AT+QGMR");
+
+    sendTerminalCapability();
 
     return 0;
 }

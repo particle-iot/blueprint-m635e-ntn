@@ -16,6 +16,7 @@
  */
 
 #include "satellite.h"
+#include "modem_manager.h"
 
 #include "logging.h"
 LOG_SOURCE_CATEGORY("ncp.client");
@@ -335,6 +336,8 @@ int Satellite::begin() {
 
     Cellular.command(2000, "AT+QGMR");
 
+    ModemManager::sendTerminalCapability();
+
     // Check if ntn_locfix needs to be set or unset
     auto resetModem = false;
     GnssPositioningInfo locFixSetting = {};
@@ -365,6 +368,7 @@ int Satellite::begin() {
         }
 
         waitAtResponse(10);
+        ModemManager::sendTerminalCapability();
         // Read back settings after reset
         Cellular.command(2000, "AT+QNWCFG=\"ntn_locfix\"");
     }
@@ -388,6 +392,7 @@ int Satellite::begin() {
         Cellular.command(2000, "AT+QCFG=\"nwscanmode\",3,1"); // LTE (includes NTN)
         Cellular.command(2000, "AT+QCFG=\"iotopmode\",3,1");  // NTN only
         Cellular.command(180000, "AT+CFUN=1");
+        ModemManager::sendTerminalCapability();
     }
 
     return initProtocolStack();
@@ -527,6 +532,7 @@ int Satellite::connect() {
     int cfunVal = -1;
     if ( RESP_OK == Cellular.command(cbCFUN, &cfunVal, 180000, "AT+CFUN?") && cfunVal != 1 ) {
         Cellular.command(180000, "AT+CFUN=1");
+        ModemManager::sendTerminalCapability();
     }
 
     return 0;
@@ -666,6 +672,7 @@ void Satellite::updateRegistration(bool force) {
             Log.info("No registration for %d minutes, toggling CFUN.", SATELLITE_NCP_NO_REGISTRATION_MS / 60000);
             Cellular.command(180000, "AT+CFUN=0");
             Cellular.command(180000, "AT+CFUN=1");
+            ModemManager::sendTerminalCapability();
             noRegistrationTimer_ = millis();
         }
     }
@@ -977,6 +984,7 @@ int Satellite::processErrors() {
         // reset modem and re-init
         Cellular.command(180000, "AT+CFUN=0");
         Cellular.command(180000, "AT+CFUN=1");
+        ModemManager::sendTerminalCapability();
         errorCount_ = 0;
         registrationUpdateMs_ = SATELLITE_NCP_REGISTRATION_UPDATE_FAST_MS;
         registered_ = 0;

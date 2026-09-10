@@ -170,6 +170,13 @@ public:
         return servingCell_;
     };
 
+    // Terrestrial registration, as of the last registration poll: the operator
+    // name from AT+COPS?, or "" when the cellular radio is not registered.
+    // Independent of NTN registration - see queryCellularRegistration().
+    const char* cellularOperator(void) const {
+        return cellularOperator_;
+    };
+
 #if SECURE_UDP_ENABLED
     // Downlink secure-verification failures, split by mode: an attack signal
     // (badTag), normal retransmission noise (replay), and an operational
@@ -241,6 +248,10 @@ private:
 
     char publishBuffer[1024] = {};
 
+    // Last +COPS: <oper>, "" when the terrestrial radio is unregistered.
+    // Reporting only - NTN registration is owned by servingCell_.state.
+    char cellularOperator_[32] = {};
+
     static int cbCFUN(int type, const char* buf, int len, int* cfun);
     static int cbCOPS(int type, const char* buf, int len, char* network);
     static int cbQCFGEXTquery(int type, const char* buf, int len, int* rxlen);
@@ -253,7 +264,7 @@ private:
     static int cbQNWCFGNTNLOCFIX(int type, const char* buf, int len, GnssPositioningInfo* info);
 
     bool locFixMatches(const GnssPositioningInfo& cur) const;
-    int isRegistered(void);
+    int queryCellularRegistration(void);
     int queryServingCell(void);
     int waitAtResponse(unsigned int tries, unsigned int timeout = 1000);
     int publishImpl(int code, const std::optional<Variant>& data = std::nullopt);

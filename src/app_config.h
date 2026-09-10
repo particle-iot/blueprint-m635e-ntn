@@ -33,7 +33,7 @@
 //   milliseconds (e.g. `g_cfg.fooS * 1000UL`).
 // =============================================================================
 
-static constexpr int NTN_PUBLISH_INTERVAL_MIN_S = 30;
+static constexpr int NTN_PUBLISH_INTERVAL_MIN_S = 1;
 
 struct AppConfig {
     // ---- Feature toggles --------------------------------------------------

@@ -111,7 +111,7 @@ int Satellite::cbCFUN(int type, const char* buf, int len, int* cfun)
 int Satellite::cbCOPS(int type, const char* buf, int len, char* network)
 {
     if ((type == TYPE_PLUS) && network) {
-        if (sscanf(buf, "\r\n+COPS: 0,0,\"%[^\"]\r\n", network) == 1)
+        if (sscanf(buf, "\r\n+COPS: %*d,%*d,\"%[^\"]\r\n", network) == 1)
             /*nothing*/;
     }
     return WAIT;
@@ -246,39 +246,59 @@ bool Satellite::locFixMatches(const GnssPositioningInfo& cur) const {
         && lround(cur.altitude) == lround(locAlt_);
 }
 
-// Pure query: returns 1 if registered on a network, 0 otherwise.
-int Satellite::isRegistered() {
-    char network[32] = "";
-    Cellular.command(2000, "AT+CEREG?");
-    if ((RESP_OK == Cellular.command(cbCOPS, network, 10000, "AT+COPS?"))
-            && (strcmp(network, "") != 0)) {
-        // Log.trace("SATELLITE NETWORK REGISTERED = %s", network);
+// Terrestrial (LTE) registration, for reporting only - it does NOT gate the
+// NTN connect path. NTN registration comes from AT+QENG="servingcell" (see
+// queryServingCell()); the two genuinely disagree, and each is authoritative
+// for its own radio.
+//
+// AT+CEREG? cannot be read back by the application: Device OS consumes the
+// +CEREG: response for its own registration tracking, so an application
+// callback never sees it and <stat> stays unset. It is still issued here so
+// each poll lands in the AT trace, which is what a field log is read for.
+//
+// AT+COPS? does reach the application intact. The modem populates <oper> only
+// once it has registered:
+//   +COPS: 0                 - not registered
+//   +COPS: 0,0,"901 98",14   - registered to 901 98
+// so a non-empty operator name is the signal. AT+COPS=3,0 at init fixes
+// <format> to the long alphanumeric form that cbCOPS expects. The result is
+// cached in cellularOperator_ for the status line.
+int Satellite::queryCellularRegistration() {
+    cellularOperator_[0] = '\0';
+
+    Cellular.command(2000, "AT+CEREG?"); // trace only, see above
+    if ((RESP_OK == Cellular.command(cbCOPS, cellularOperator_, 10000, "AT+COPS?"))
+            && (cellularOperator_[0] != '\0')) {
         return 1;
     }
+    cellularOperator_[0] = '\0'; // partial parse on a failed command
     return 0;
 }
 
 // AT+QENG="servingcell" <state> values:
 //   SEARCH  - no cell found yet, not on the network
-//   LIMSRV  - camped on a cell, not yet registered
-//   NOCONN  - camped AND registered, idle mode (no active bearer) - still attached
-//   CONNECT - camped AND registered, active call/data in progress
+//   LIMSRV  - camped on a cell, limited service
+//   NOCONN  - camped and registered, idle mode (no active bearer)
+//   CONNECT - camped and registered, active call/data in progress
+//
+// SEARCH is the only state that counts as unregistered: it is the one state
+// where the modem holds no cell at all. LIMSRV means a cell has been found and
+// acquisition is progressing, so it is treated as registered - the alternative
+// is that the prolonged-no-registration recovery in updateRegistration()
+// toggles CFUN and throws away real acquisition progress. An empty state means
+// the QENG query itself failed, which is not evidence of registration.
 static bool ntnRegistered(const char* state) {
-    return strcmp(state, "CONNECT") == 0 || strcmp(state, "NOCONN") == 0;
+    return state[0] && strcmp(state, "SEARCH") != 0;
 }
 
 // Query and parse the serving-cell report into servingCell_.
+//
+// This is the source of truth for NTN registration (via ntnRegistered() on
+// <state>) and also carries the signal metrics the status line prints. CEREG
+// and COPS describe the terrestrial radio and are not consulted here.
 int Satellite::queryServingCell() {
     servingCell_ = NtnServingCellInfo{};
     Cellular.command(cbQENG, &servingCell_, 2000, "AT+QENG=\"servingcell\"");
-
-    if (nwConnected_ == NW_CONNECTED_SUCCESS && !ntnRegistered(servingCell_.state)) {
-        proto_.disconnect();
-        ntnConnected_ = 0;
-        nwConnected_ = NW_CONNECTED_INIT;
-        ntnInit_ = 0; // in case we de-registered, make sure NTN is re-initialized
-        // do not change state of nwConnectionDesired_, connection should come back on its own
-    }
 
     return servingCell_.state[0] ? 0 : -1;
 }
@@ -378,7 +398,9 @@ int Satellite::begin() {
     Cellular.command(2000, "AT+CEREG?");
     Cellular.command(2000, "AT+COPS=3,0");
 
-    if (isRegistered()) {
+    queryCellularRegistration(); // trace + seed cellularOperator_
+    queryServingCell();
+    if (ntnRegistered(servingCell_.state)) {
         registered_ = 1;
         Log.info("SKIPPING THE FOLLOWING COMMANDS:\n"
             "\"AT+CFUN=0\"\n"
@@ -596,13 +618,9 @@ int Satellite::connectImpl() {
     }
 
     if (ntnInit_) {
-        queryServingCell();
-
-        if (ntnRegistered(servingCell_.state)) {
-            ntnConnected_ = 1;
-        } else {
-            ntnConnected_ = 0;
-        }
+        // registered_ was checked on entry and is owned by updateRegistration()
+        // (serving-cell <state>); the data session is up once ntnInit_ succeeded.
+        ntnConnected_ = 1;
     }
 
     if (ntnConnected_) {
@@ -653,7 +671,21 @@ void Satellite::updateRegistration(bool force) {
     }
     lastRegistrationCheck_ = millis();
 
-    int r = isRegistered() && (!servingCell_.state[0] || ntnRegistered(servingCell_.state));
+    // Refresh the serving-cell report here so the decision is never made on
+    // stale data, and stamp the status-line timer so process() does not
+    // immediately re-poll the same command.
+    queryServingCell();
+    lastServingCellCheck_ = lastRegistrationCheck_;
+
+    // Terrestrial registration: logged and cached for the status line, but it
+    // has no say in NTN registration state.
+    queryCellularRegistration();
+
+    // An empty state means the QENG query itself failed (busy modem, AT
+    // timeout) rather than that the modem lost its cell - the old code guarded
+    // this the same way. Hold the previous state instead of tearing down a
+    // working session, and instead of inventing a registration we never saw.
+    int r = servingCell_.state[0] ? ntnRegistered(servingCell_.state) : registered_;
 
     if (r) {
         noRegistrationTimer_ = 0;
@@ -662,8 +694,14 @@ void Satellite::updateRegistration(bool force) {
             ntnConnected_ = 0;
         }
     } else {
+        // Registration lost: tear the cloud session down so it is rebuilt on
+        // reattach. nwConnectionDesired_ is left alone - the connection should
+        // come back on its own once the serving cell comes back.
+        if (nwConnected_ == NW_CONNECTED_SUCCESS) {
+            proto_.disconnect();
+        }
         nwConnected_ = NW_CONNECTED_INIT;
-        ntnInit_ = 0;
+        ntnInit_ = 0; // in case we de-registered, make sure NTN is re-initialized
         ntnConnected_ = 0;
         if (!noRegistrationTimer_) {
             noRegistrationTimer_ = millis();

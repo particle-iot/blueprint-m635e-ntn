@@ -412,6 +412,53 @@ void updateConnectionTimers() {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Battery status log
+// -----------------------------------------------------------------------------
+static constexpr uint32_t kBatteryLogIntervalMs = 60000;
+
+const char* batteryStateName(int state) {
+    switch (state) {
+        case BATTERY_STATE_NOT_CHARGING: return "not-charging";
+        case BATTERY_STATE_CHARGING:     return "charging";
+        case BATTERY_STATE_CHARGED:      return "charged";
+        case BATTERY_STATE_DISCHARGING:  return "discharging";
+        case BATTERY_STATE_FAULT:        return "fault";
+        case BATTERY_STATE_DISCONNECTED: return "disconnected";
+        default:                         return "unknown";
+    }
+}
+
+const char* powerSourceName(int source) {
+    switch (source) {
+        case POWER_SOURCE_VIN:         return "vin";
+        case POWER_SOURCE_USB_HOST:    return "usb-host";
+        case POWER_SOURCE_USB_ADAPTER: return "usb-adapter";
+        case POWER_SOURCE_USB_OTG:     return "usb-otg";
+        case POWER_SOURCE_BATTERY:     return "batt";
+        default:                       return "unknown";
+    }
+}
+
+void logBatteryStatus() {
+    static uint32_t lastCheck = millis();
+    if (millis() - lastCheck <= kBatteryLogIntervalMs) {
+        return;
+    }
+    lastCheck = millis();
+
+    static FuelGauge fuel;
+    const float volts = fuel.getVCell();
+    if (volts < 0) {
+        Log.info("[Batt: unavailable]");
+        return;
+    }
+
+    Log.info("[Batt: %.2fV %.1f%% %s src=%s]", volts, fuel.getNormalizedSoC(),
+        batteryStateName(System.batteryState()),
+        powerSourceName(System.powerSource()));
+}
+
 // Device status line: active profile, app state, time in
 // state, time until next publish, and the active radio's signal / band. Pass
 // force=true to print immediately (e.g. right after a radio switch).
@@ -534,6 +581,7 @@ void loop()
 {
     updateConnectionTimers();
     logStatusLine();
+    logBatteryStatus();
 
     switch (appState) {
         // --------------------------------------------------------------------

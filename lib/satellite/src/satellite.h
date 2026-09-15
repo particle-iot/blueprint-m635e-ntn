@@ -22,6 +22,7 @@
 #include "system_error.h"
 #include "cloud_protocol.h"
 
+#include <functional>
 #include <optional>
 
 // Secure UDP Phase 1 (CDS-UDP-v1) wraps the NTN UDP path. Set to 0 to fall back
@@ -110,6 +111,37 @@ public:
     int disconnect(void);
     bool connected(void);
     int tx(const uint8_t* buf, size_t len, int port);
+
+    // ---- Raw passthrough mode (application testing) -----------------------
+    // Sends and receives datagrams with NO constrained protocol and NO secure
+    // UDP frame: the bytes handed to txRaw() are exactly the bytes on the wire,
+    // and inbound datagrams are handed back verbatim. Everything below the
+    // protocol layer is unchanged - registration, ntn_locfix, the PDP/socket
+    // lifecycle, the QISENDEX retry + socket-rebuild logic and process() all
+    // behave identically. Intended for talking to your own UDP test endpoint;
+    // the Particle ingress will not accept unauthenticated datagrams.
+    typedef std::function<void(const uint8_t* data, size_t len)> RawRxHandler;
+
+    // Enable/disable raw mode and install the downlink handler. Call before
+    // begin() so the first openDataSession() and the first inbound poll both
+    // see the mode. Passing nullptr keeps datagrams logged but undelivered.
+    void setRawMode(bool enabled, RawRxHandler onRx = nullptr);
+
+    bool rawMode(void) const {
+        return rawMode_;
+    }
+
+    // Raw uplink. Returns 0 on AT-accepted send, SYSTEM_ERROR_TOO_LARGE when
+    // len exceeds the on-wire cap (the full cap is available here - there is no
+    // secure-frame overhead to subtract), SYSTEM_ERROR_INVALID_STATE when the
+    // transport is not up.
+    int txRaw(const uint8_t* buf, size_t len);
+
+    // Override the UDP endpoint both transports send to. Must be called before
+    // begin() / beginCellularTransport(): the address is baked into AT+QIOPEN
+    // when the data session is built. Numeric IP only - DNS resolution over NTN
+    // is not feasible. Defaults to the Particle secure ingress.
+    void setEndpoint(const IPAddress& ip, uint16_t port);
 
     int publish(int code) {
         return proto_.publish(code);
@@ -228,6 +260,16 @@ private:
     size_t maxPayloadSize_ = 0;
     constrained::CloudProtocol proto_;
 
+    // UDP endpoint for both transports; overridable via setEndpoint(). Numeric
+    // IPs only - DNS resolution over NTN is not feasible.
+    IPAddress endpointIp_ = IPAddress(52, 5, 13, 97); // secure ingress
+    uint16_t  endpointPort_ = 9932;                   // secure ingress
+
+    // Raw passthrough: bypasses secure UDP + CloudProtocol in both directions.
+    // See setRawMode(). Nothing below the protocol layer is affected.
+    bool rawMode_ = false;
+    RawRxHandler rawRxHandler_;
+
     // Which byte transport tx()/receive uses under the constrained protocol.
     //   NTN_AT_SOCKET: app-owned modem, hex encode + AT+QISENDEX / AT+QIRD.
     //   DEVICEOS_UDP : Device OS UDP socket over the normal connection.
@@ -277,6 +319,10 @@ private:
     void noteSocketLost(const char* why);
     int waitAtResponse(unsigned int tries, unsigned int timeout = 1000);
     int publishImpl(int code, const std::optional<Variant>& data = std::nullopt);
+    // Byte transport shared by tx() (secure-wrapped) and txRaw() (verbatim):
+    // Device OS UDP sendPacket, or hex encode + the AT+QISENDEX retry / socket
+    // rebuild loop.
+    int txBytes(const uint8_t* buf, size_t len);
     void updateRegistration(bool force = false);
 
     void receiveData(void);

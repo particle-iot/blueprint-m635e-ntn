@@ -144,6 +144,62 @@ int AppPublisher::publishConstrained(const char* name, uint8_t code,
     return r;
 }
 
+int AppPublisher::publishRaw(const uint8_t* data, size_t len) {
+    if (!data || len == 0) {
+        pubLog.error("raw publish: empty payload");
+        return SYSTEM_ERROR_INVALID_ARGUMENT;
+    }
+
+    // Raw passthrough only exists on the satellite AT socket - there is no
+    // event name to fall back to Particle.publish with, so anything other than
+    // a connected NTN radio is a drop, counted like any other.
+    if (modem_.radioEnabled() != RADIO_SATELLITE) {
+        ++stats_.dropped;
+        pubLog.warn("raw publish: satellite radio not active, dropped");
+        return SYSTEM_ERROR_INVALID_STATE;
+    }
+    if (!sat_.connected()) {
+        ++stats_.dropped;
+        pubLog.warn("raw publish: NTN not connected, dropped");
+        return SYSTEM_ERROR_INVALID_STATE;
+    }
+    if (!sat_.rawMode()) {
+        // The app config and the library disagree; sending here would put the
+        // bytes through the secure wrapper and mean something else entirely.
+        ++stats_.dropped;
+        pubLog.error("raw publish: library raw mode is not enabled, dropped");
+        return SYSTEM_ERROR_INVALID_STATE;
+    }
+
+    // Same single rate-limit bucket as the constrained path.
+    const uint32_t now = millis();
+    const uint32_t gapMs = NTN_PUBLISH_INTERVAL_MIN_S * 1000UL;
+    if (!gapElapsed(ntnLastSendMs_, now, gapMs)) {
+        ++stats_.rateLimited;
+        pubLog.info("RAW publish rate-limited (%lums since last, gap %lums)",
+            (unsigned long)(now - ntnLastSendMs_), (unsigned long)gapMs);
+        return SYSTEM_ERROR_LIMIT_EXCEEDED;
+    }
+
+    int r = sat_.txRaw(data, len);
+    if (r == 0) {
+        ntnLastSendMs_ = now ? now : 1; // avoid the "never sent" sentinel
+        ++stats_.ntnOk;
+        pubLog.info("RAW publish %u bytes accepted (#%lu)",
+            (unsigned)len, (unsigned long)stats_.ntnOk);
+        return 0;
+    }
+    if (r == SYSTEM_ERROR_TOO_LARGE) {
+        ++stats_.oversized;
+        pubLog.error("RAW publish rejected as too large (%u bytes)", (unsigned)len);
+        return r;
+    }
+    ++stats_.ntnFail;
+    pubLog.warn("RAW publish %u bytes failed: %d (#%lu)",
+        (unsigned)len, r, (unsigned long)stats_.ntnFail);
+    return r;
+}
+
 void AppPublisher::logStats() const {
     pubLog.info("stats: lte=%lu/%lu ntn=%lu/%lu drop=%lu over=%lu rl=%lu unk=%lu pfail=%lu cex=%lu",
         (unsigned long)stats_.lteOk,

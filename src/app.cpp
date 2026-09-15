@@ -248,6 +248,87 @@ const char* accessTechName(hal_net_access_tech_t rat) {
     publisher.publish("loc", locEvent);
 }
 
+// -----------------------------------------------------------------------------
+// Raw NTN passthrough (g_cfg.ntnRawMode)
+// -----------------------------------------------------------------------------
+// In raw mode nothing wraps the payload: the bytes buildRawPayload() writes are
+// exactly the bytes in the UDP datagram, so the JSON length IS the on-wire
+// length. Keep it <= NTN_MAX_PAYLOAD_SIZE (256). 
+
+// Datagram cap on the NTN AT socket (256 raw bytes = 512 hex chars on the
+// QISENDEX line). The library rejects anything larger.
+static uint32_t packetCounter = 0;
+static constexpr size_t kRawPayloadMax = 256;
+static constexpr size_t kRawTargetWireBytes = 150;
+
+// ---- EDIT ME ----------------------------------------------------------------
+// Builds the raw NTN test payload. Returns bytes written, or 0 on failure.
+//
+// Default: {"seq":<n>,"t":<epoch>,"data":"<random ascii>"} padded to exactly
+// kRawTargetWireBytes. The random tail absorbs the width of the seq/time
+// fields, so the datagram size stays fixed as the counter grows. Replace the
+// body with whatever your test needs - this is the only function that decides
+// what goes on the wire in raw mode.
+static size_t buildRawPayload(char* buf, size_t cap) {
+    static const char kCharset[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    constexpr size_t kCharsetLen = sizeof(kCharset) - 1; // drop the NUL
+
+    const size_t target = (kRawTargetWireBytes < cap) ? kRawTargetWireBytes : (cap - 1);
+    const uint32_t seq = packetCounter++;
+
+    // Everything except the random tail and the closing quote+brace.
+    int n = snprintf(buf, cap, "{\"seq\":%lu,\"t\":%lu,\"data\":\"",
+        (unsigned long)seq, (unsigned long)Time.now());
+    if (n < 0 || (size_t)n + 2 >= target) {
+        Log.error("raw payload prefix does not fit in %u bytes", (unsigned)target);
+        return 0;
+    }
+
+    size_t off = (size_t)n;
+    const size_t tailEnd = target - 2; // room for the closing '"' and '}'
+    for (; off < tailEnd; ++off) {
+        buf[off] = kCharset[random(kCharsetLen)];
+    }
+    buf[off++] = '"';
+    buf[off++] = '}';
+    buf[off] = '\0';
+    return off;
+}
+// ---- /EDIT ME ---------------------------------------------------------------
+
+// Raw downlink handler: whatever the test endpoint sends back arrives here
+// verbatim, with no verification or decoding. Parse it here if your test needs
+// to act on downlinks.
+static uint32_t rawRxCount = 0;
+
+static void onRawDatagram(const uint8_t* data, size_t len) {
+    ++rawRxCount;
+
+    // NUL-terminate a printable copy for the log; the library has already
+    // logged the hex at trace level.
+    char text[kRawPayloadMax + 1];
+    const size_t n = (len < kRawPayloadMax) ? len : kRawPayloadMax;
+    for (size_t i = 0; i < n; ++i) {
+        const unsigned char c = data[i];
+        text[i] = (c >= 0x20 && c < 0x7f) ? (char)c : '.';
+    }
+    text[n] = '\0';
+
+    Log.info("raw RX #%lu (%u bytes): %s", (unsigned long)rawRxCount,
+        (unsigned)len, text);
+}
+
+static void publishRawData() {
+    char buf[kRawPayloadMax];
+    const size_t n = buildRawPayload(buf, sizeof(buf));
+    if (n == 0) {
+        return;
+    }
+    Log.info("raw TX (%u bytes): %s", (unsigned)n, buf);
+    publisher.publishRaw((const uint8_t*)buf, n);
+}
+
 static void publishEventExample() {
     auto now = (unsigned int)Time.now();
     particle::Variant event;
@@ -258,8 +339,12 @@ static void publishEventExample() {
 }
 
 void appPublishData() {
-    // publishLocationExample();
-    publishEventExample();
+    if (g_cfg.ntnRawMode) {
+        publishRawData();
+    } else {
+        // publishLocationExample();
+        publishEventExample();
+    }
     publisher.logStats();
 }
 
@@ -304,6 +389,9 @@ static particle::Variant collectVitals() {
 }
 
 static void publishVitals() {
+    if (g_cfg.ntnRawMode) {
+        return;
+    }
     // TODO: This is published as a generic event right now, but constrained device
     // service should be updated to handle these properly as a DIAGNOSTICS message 
     // and processed the same as non NTN vitals. 
@@ -506,6 +594,17 @@ void setup()
     loadAppConfig();
 
     satellite.setMaxPayloadSize(g_cfg.ntnMaxPayloadSize);
+
+    // Raw passthrough must be configured before the first satellite.begin():
+    // the endpoint is baked into AT+QIOPEN when the data session is built, and
+    // the mode gates the very first inbound poll.
+    if (g_cfg.ntnRawMode) {
+        satellite.setEndpoint(
+            IPAddress(g_cfg.rawEndpointIp[0], g_cfg.rawEndpointIp[1],
+                      g_cfg.rawEndpointIp[2], g_cfg.rawEndpointIp[3]),
+            (uint16_t)g_cfg.rawEndpointPort);
+        satellite.setRawMode(true, onRawDatagram);
+    }
 
     modem.begin();
 

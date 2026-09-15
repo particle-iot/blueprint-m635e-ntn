@@ -56,6 +56,30 @@ void applyU32Env(const char* key, uint32_t& dest) {
     }
 }
 
+// Dotted-quad IPv4: overwrite `dest` only when the variable is present AND all
+// four octets parse and fit in a byte. Numeric only - there is no DNS on the
+// NTN path.
+void applyIpEnv(const char* key, uint8_t (&dest)[4]) {
+    String val;
+    if (!System.getEnv(key, val)) {
+        if (System.hasEnv(key)) {
+            cfgLog.warn("env '%s' unreadable; using default", key);
+        }
+        return;
+    }
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    if (sscanf(val.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4 ||
+            a > 255 || b > 255 || c > 255 || d > 255) {
+        cfgLog.warn("env '%s'='%s' is not a dotted-quad IPv4 address; using default",
+            key, val.c_str());
+        return;
+    }
+    dest[0] = (uint8_t)a;
+    dest[1] = (uint8_t)b;
+    dest[2] = (uint8_t)c;
+    dest[3] = (uint8_t)d;
+}
+
 constexpr const char* kEnvLocationFixed = "PARTICLE_LOCATION_FIXED";
 
 // Returns true only when the env var is present AND parses to valid coordinates.
@@ -91,6 +115,9 @@ AppConfig g_cfg = {
     /* ntnPublishIntervalS            */ 3 * 60,
     /* vitalsIntervalS                */ 10 * 60,
     /* ntnMaxPayloadSize              */ 256,
+    /* ntnRawMode                     */ false,
+    /* rawEndpointIp                  */ { 3, 231, 157, 58 },
+    /* rawEndpointPort                */ 40000,
     /* cellularDisconnectedTimeoutS   */ 10 * 60,
     /* satelliteConnectedTimeoutS     */ 10 * 60,
     /* satelliteDisconnectedTimeoutS  */ 10 * 60,
@@ -119,6 +146,9 @@ void loadAppConfig() {
     applyU32Env      ("NTN_PUBLISH_INTERVAL_S",             g_cfg.ntnPublishIntervalS);
     applyU32Env      ("VITALS_INTERVAL_S",                  g_cfg.vitalsIntervalS);
     applyU32Env      ("NTN_MAX_PAYLOAD_SIZE",               g_cfg.ntnMaxPayloadSize);
+    applyBoolEnv     ("NTN_RAW_MODE",                       g_cfg.ntnRawMode);
+    applyIpEnv       ("RAW_ENDPOINT_IP",                    g_cfg.rawEndpointIp);
+    applyU32Env      ("RAW_ENDPOINT_PORT",                  g_cfg.rawEndpointPort);
     applyU32Env      ("CELLULAR_DISCONNECTED_TIMEOUT_S",    g_cfg.cellularDisconnectedTimeoutS);
     applyU32Env      ("SATELLITE_CONNECTED_TIMEOUT_S",      g_cfg.satelliteConnectedTimeoutS);
     applyU32Env      ("SATELLITE_DISCONNECTED_TIMEOUT_S",   g_cfg.satelliteDisconnectedTimeoutS);
@@ -155,6 +185,12 @@ void loadAppConfig() {
         g_cfg.ntnPublishIntervalS = NTN_PUBLISH_INTERVAL_MIN_S;
     }
 
+    if (g_cfg.rawEndpointPort == 0 || g_cfg.rawEndpointPort > 65535) {
+        cfgLog.warn("RAW_ENDPOINT_PORT %lu out of range; raw mode disabled",
+            (unsigned long)g_cfg.rawEndpointPort);
+        g_cfg.ntnRawMode = false;
+    }
+
     cfgLog.info("App config:");
     cfgLog.info("  lteEnabled=%s ntnEnabled=%s startOnCellular=%s constrainedProtoOnCell=%s initialOnlineTimeoutS=%lus",
         g_cfg.lteEnabled ? "true" : "false",
@@ -167,6 +203,13 @@ void loadAppConfig() {
         (unsigned long)g_cfg.ntnPublishIntervalS,
         (unsigned long)g_cfg.vitalsIntervalS,
         (unsigned long)g_cfg.ntnMaxPayloadSize);
+    if (g_cfg.ntnRawMode) {
+        cfgLog.warn("  *** NTN RAW PASSTHROUGH MODE *** dst=%u.%u.%u.%u:%lu - "
+            "no constrained protocol, no secure UDP, no vitals",
+            (unsigned)g_cfg.rawEndpointIp[0], (unsigned)g_cfg.rawEndpointIp[1],
+            (unsigned)g_cfg.rawEndpointIp[2], (unsigned)g_cfg.rawEndpointIp[3],
+            (unsigned long)g_cfg.rawEndpointPort);
+    }
     cfgLog.info("  switch timeouts: cellDis=%lus satCon=%lus satDis=%lus",
         (unsigned long)g_cfg.cellularDisconnectedTimeoutS,
         (unsigned long)g_cfg.satelliteConnectedTimeoutS,

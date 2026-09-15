@@ -36,13 +36,6 @@ LOG_SOURCE_CATEGORY("ncp.client");
 #define USE_NON_IP 0
 #define UDP_CONNECT_ID 0
 
-// Single source of truth for the UDP endpoint, shared by BOTH transports.
-// Numeric IPs only; DNS resolution over NTN is not feasible
-// static const IPAddress kUdpEndpointIp(3, 231, 157, 58); // debug echo server "publish-receiver-udp.particle.io"
-// static const uint16_t kUdpPort = 40000;                  // debug echo server
-static const IPAddress kUdpEndpointIp(52, 5, 13, 97);       // secure ingress
-static const uint16_t kUdpPort = 9932;                      // secure ingress
-
 static const size_t kUdpRxBufferSize = 320;
 
 // Canonical on-wire datagram cap for outbound frames on both transports: the
@@ -500,6 +493,24 @@ int Satellite::initProtocolStack() {
     return 0;
 }
 
+void Satellite::setRawMode(bool enabled, RawRxHandler onRx) {
+    rawMode_ = enabled;
+    rawRxHandler_ = std::move(onRx);
+    if (enabled) {
+        Log.warn("NTN RAW PASSTHROUGH enabled: datagrams bypass the constrained "
+                 "protocol and secure UDP in both directions");
+    }
+}
+
+void Satellite::setEndpoint(const IPAddress& ip, uint16_t port) {
+    endpointIp_ = ip;
+    endpointPort_ = port;
+    Log.info("UDP endpoint set to %u.%u.%u.%u:%u",
+        (unsigned)endpointIp_[0], (unsigned)endpointIp_[1],
+        (unsigned)endpointIp_[2], (unsigned)endpointIp_[3],
+        (unsigned)endpointPort_);
+}
+
 int Satellite::beginCellularTransport() {
     if (cellularTransportActive()) {
         return 0;
@@ -518,8 +529,8 @@ int Satellite::beginCellularTransport() {
     }
 
     udp_.setBuffer(kUdpRxBufferSize);
-    if (!udp_.begin(kUdpPort)) {
-        Log.error("UDP begin on port %u failed", (unsigned)kUdpPort);
+    if (!udp_.begin(endpointPort_)) {
+        Log.error("UDP begin on port %u failed", (unsigned)endpointPort_);
         return SYSTEM_ERROR_NETWORK;
     }
     transportMode_ = TransportMode::DEVICEOS_UDP;
@@ -527,9 +538,9 @@ int Satellite::beginCellularTransport() {
     lastUdpReceiveCheck_ = 0;
     proto_.connect();
     Log.info("Constrained protocol over Device OS UDP started (dst %u.%u.%u.%u:%u, local port %u)",
-        (unsigned)kUdpEndpointIp[0], (unsigned)kUdpEndpointIp[1],
-        (unsigned)kUdpEndpointIp[2], (unsigned)kUdpEndpointIp[3],
-        (unsigned)kUdpPort, (unsigned)kUdpPort);
+        (unsigned)endpointIp_[0], (unsigned)endpointIp_[1],
+        (unsigned)endpointIp_[2], (unsigned)endpointIp_[3],
+        (unsigned)endpointPort_, (unsigned)endpointPort_);
     return 0;
 }
 
@@ -658,10 +669,14 @@ int Satellite::openDataSession() {
 
     Cellular.command(2000, "AT+QICFG=\"dataformat\",0,1");
 
+    Log.info("Opening NTN UDP socket to %u.%u.%u.%u:%u%s",
+            (unsigned)endpointIp_[0], (unsigned)endpointIp_[1],
+            (unsigned)endpointIp_[2], (unsigned)endpointIp_[3],
+            (unsigned)endpointPort_, rawMode_ ? " (RAW passthrough)" : "");
     r = Cellular.command(150 * 1000, "AT+QIOPEN=1,%d,\"UDP\",\"%u.%u.%u.%u\",%u", UDP_CONNECT_ID,
-            (unsigned)kUdpEndpointIp[0], (unsigned)kUdpEndpointIp[1],
-            (unsigned)kUdpEndpointIp[2], (unsigned)kUdpEndpointIp[3],
-            (unsigned)kUdpPort);
+            (unsigned)endpointIp_[0], (unsigned)endpointIp_[1],
+            (unsigned)endpointIp_[2], (unsigned)endpointIp_[3],
+            (unsigned)endpointPort_);
 
     if (r != RESP_OK) {
         Log.warn("QIOPEN rejected: %d", r);
@@ -872,6 +887,28 @@ void Satellite::receiveData(void) {
 // Verify + dispatch one inbound datagram; shared by the NTN AT read path and
 // the Device OS UDP poll.
 void Satellite::handleInboundDatagram(char* data, size_t len) {
+    if (rawMode_) {
+        char hexBuf[kUdpRxBufferSize * 2 + 1] = {};
+        const size_t dumpLen = (len < kUdpRxBufferSize) ? len : kUdpRxBufferSize;
+        toHex(data, dumpLen, hexBuf, sizeof(hexBuf));
+
+        constexpr size_t kTextLogMax = 160;
+        char text[kTextLogMax + 1] = {};
+        const size_t textLen = (dumpLen < kTextLogMax) ? dumpLen : kTextLogMax;
+        for (size_t i = 0; i < textLen; ++i) {
+            const unsigned char c = (unsigned char)data[i];
+            text[i] = (c >= 0x20 && c < 0x7f) ? (char)c : '.';
+        }
+        text[textLen] = '\0';
+
+        Log.info("RAW RX: %u bytes: %s", (unsigned)len, text);
+        Log.trace("%s", hexBuf);
+
+        if (rawRxHandler_) {
+            rawRxHandler_((const uint8_t*)data, len);
+        }
+        return;
+    }
 #if SECURE_UDP_ENABLED
     // Log the raw encrypted frame in the same hex format as tx(), so inbound
     // datagrams (echoes, dupes) can be matched to uplinks by frame counter.
@@ -981,13 +1018,35 @@ int Satellite::tx(const uint8_t* buf, size_t len, int port) {
     len = frameLen;
 #endif
 
+    return txBytes(buf, len);
+}
+
+int Satellite::txRaw(const uint8_t* buf, size_t len) {
+    if (transportMode_ == TransportMode::DEVICEOS_UDP) {
+        if (!udpStarted_ || !Particle.connected()) {
+            return SYSTEM_ERROR_INVALID_STATE;
+        }
+    } else if (!registered_ || !connected()) {
+        return SYSTEM_ERROR_INVALID_STATE;
+    }
+
+    if (maxPayloadSize_ && len > maxPayloadSize_) {
+        Log.error("Raw payload %u bytes exceeds on-wire cap %u",
+            (unsigned)len, (unsigned)maxPayloadSize_);
+        return SYSTEM_ERROR_TOO_LARGE;
+    }
+
+    return txBytes(buf, len);
+}
+
+int Satellite::txBytes(const uint8_t* buf, size_t len) {
     if (transportMode_ == TransportMode::DEVICEOS_UDP) {
         // Raw datagram over the Device OS socket; no hex/AT framing. A send
         // failure here must NOT feed errorCount_ - that counter drives the
         // NTN modem (CFUN) recovery in processErrors(), and a UDP failure on
         // the normal connection must not queue a modem reset for the next
         // NTN session.
-        int sent = udp_.sendPacket(buf, len, kUdpEndpointIp, kUdpPort);
+        int sent = udp_.sendPacket(buf, len, endpointIp_, endpointPort_);
         if (sent < (int)len) {
             Log.error("UDP sendPacket failed: %d (%u bytes)", sent, (unsigned)len);
             return -1;

@@ -248,43 +248,6 @@ const char* accessTechName(hal_net_access_tech_t rat) {
     publisher.publish("loc", locEvent);
 }
 
-static constexpr size_t kTargetWireBytes = 150;
-// Anything that changes the shape of the event shifts these numbers,
-// so re-derive kDataValueLen if you edit the payload.
-static constexpr size_t kDataValueLen = 125;
-
-static uint32_t packetCounter = 0;
-
-// Builds the event data value: "Packet #<n> " followed by random ASCII, padded
-// to exactly kDataValueLen characters (plus a NUL). The random tail absorbs the
-// width of the prefix, so the value length - and the datagram - stay fixed as
-// the counter grows.
-static void publishFixedLengthRandomData() {
-    const uint32_t seq = packetCounter++;
-    char data[kDataValueLen + 1];
-
-    static const char kCharset[] =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    constexpr size_t kCharsetLen = sizeof(kCharset) - 1; // drop the NUL
-
-    int n = snprintf(data, kDataValueLen + 1, "Packet #%lu ", (unsigned long)seq);
-    size_t off = 0;
-    if (n > 0) {
-        off = ((size_t)n > kDataValueLen) ? kDataValueLen : (size_t)n;
-    }
-    for (size_t i = off; i < kDataValueLen; ++i) {
-        data[i] = kCharset[random(kCharsetLen)];
-    }
-    data[kDataValueLen] = '\0';
-
-    particle::Variant event;
-    event.set("data", data);
-
-    Log.info("event: packet #%lu, %u-byte value -> %u bytes on the wire",
-        (unsigned long)seq, (unsigned)kDataValueLen, (unsigned)kTargetWireBytes);
-    publisher.publish("event", event);
-}
-
 static void publishEventExample() {
     auto now = (unsigned int)Time.now();
     particle::Variant event;
@@ -295,9 +258,8 @@ static void publishEventExample() {
 }
 
 void appPublishData() {
-    publishFixedLengthRandomData();
     // publishLocationExample();
-    // publishEventExample();
+    publishEventExample();
     publisher.logStats();
 }
 

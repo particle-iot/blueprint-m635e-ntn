@@ -210,6 +210,10 @@ private:
     uint32_t registrationUpdateMs_ = 0;
     uint32_t noRegistrationTimer_ = 0;
     int errorCount_ = 0;
+
+    bool socketOpen_ = false;
+    bool socketSuspect_ = false;
+    uint32_t lastSocketRebuild_ = 0;
     GnssPositioningInfo lastPositionInfo_;
     NtnServingCellInfo servingCell_;
 
@@ -255,6 +259,8 @@ private:
     static int cbCFUN(int type, const char* buf, int len, int* cfun);
     static int cbCOPS(int type, const char* buf, int len, char* network);
     static int cbQCFGEXTquery(int type, const char* buf, int len, int* rxlen);
+    static int cbQIACT(int type, const char* buf, int len, int* state);
+    static int cbQISTATE(int type, const char* buf, int len, int* state);
     static int cbQIRDquery(int type, const char* buf, int len, int* rxlen);
     static int cbQIRD(int type, const char* buf, int len, char* outBuf);
     static int cbQISENDEX(int type, const char* buf, int len, int* param);
@@ -266,6 +272,10 @@ private:
     bool locFixMatches(const GnssPositioningInfo& cur) const;
     int queryCellularRegistration(void);
     int queryServingCell(void);
+    int openDataSession(void);
+    int querySocketState(void);
+    bool socketRebuildAllowed(void);
+    void noteSocketLost(const char* why);
     int waitAtResponse(unsigned int tries, unsigned int timeout = 1000);
     int publishImpl(int code, const std::optional<Variant>& data = std::nullopt);
     void updateRegistration(bool force = false);

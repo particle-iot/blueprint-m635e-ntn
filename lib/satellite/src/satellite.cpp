@@ -36,35 +36,18 @@ LOG_SOURCE_CATEGORY("ncp.client");
 #define USE_NON_IP 0
 #define UDP_CONNECT_ID 0
 
-// Single source of truth for the UDP endpoint, shared by BOTH transports: the
-// Device OS UDP API takes it as an IPAddress, and the AT path (QIOPEN) formats
-// its host argument from the same octets in place - so the two can never drift
-// apart. Numeric IPs only; a DNS hostname endpoint would need its own
-// resolution step first. kUdpPort is the port the server listens on, paired
-// with its IP - switch both by swapping one comment block. (Phase 1 secure
-// ingress uses its own port, 9932, for port-based versioning, spec §9;
-// TODO: confirm the deployed secure ingress host:port.)
-// static const IPAddress kUdpEndpointIp(13, 219, 177, 65); // debug echo server "publish-receiver-udp.particle.io"
+// Single source of truth for the UDP endpoint, shared by BOTH transports.
+// Numeric IPs only; DNS resolution over NTN is not feasible
+// static const IPAddress kUdpEndpointIp(3, 231, 157, 58); // debug echo server "publish-receiver-udp.particle.io"
 // static const uint16_t kUdpPort = 40000;                  // debug echo server
 static const IPAddress kUdpEndpointIp(52, 5, 13, 97);       // secure ingress
 static const uint16_t kUdpPort = 9932;                      // secure ingress
 
-// The Device OS UDP socket also binds kUdpPort as its device-side source port
-// (src and dst ports are independent namespaces, so this is safe). A fixed
-// local port keeps the device's NAT mapping stable so cloud downlinks (sent to
-// the source addr:port of the last verified uplink) stay routable between
-// polls, and reusing kUdpPort means it tracks the endpoint block above
-// automatically. The NTN AT path does not bind it: QIOPEN without a local port
-// lets the modem pick an ephemeral one.
-static const size_t kUdpRxBufferSize = 320; // matches the NTN path's rxData[320]
+static const size_t kUdpRxBufferSize = 320;
 
 // Canonical on-wire datagram cap for outbound frames on both transports: the
 // modem's AT-command body limit (256 raw bytes = 512 hex chars on the QISENDEX
-// line). The Device OS UDP path could carry more, but both transports share one
-// secure session and one cap so frame admission never depends on the active
-// transport. The configured max payload size is clamped to this, the protocol
-// layer's frame limit and tx()'s secure scratch buffer are both derived from
-// it, and tx() re-checks the wrapped frame against it before sending.
+// line). 
 static const size_t kMaxWireDatagramBytes = 256;
 
 namespace particle {
@@ -83,6 +66,9 @@ namespace {
 #define SATELLITE_NCP_NO_REGISTRATION_MS (300000)
 
 #define SATELLITE_NCP_COMM_ERRORS_MAX (3)
+#define SATELLITE_NCP_SOCKET_REBUILD_MS (30000)
+#define SATELLITE_NCP_SOCKET_CONFIRM_TRIES (4)
+#define SATELLITE_NCP_SOCKET_CONFIRM_MS (500)
 
 #define SATELLITE_NCP_COPS_TIMEOUT_MS (180000)
 
@@ -122,6 +108,47 @@ int Satellite::cbQCFGEXTquery(int type, const char* buf, int len, int* rxlen)
     if ((type == TYPE_PLUS) && rxlen) {
         if (sscanf(buf, "\r\n+QCFGEXT: \"nipdr\",%*d,%*d,%d\r\n", rxlen) == 1)
             /*nothing*/;
+    }
+    return WAIT;
+}
+
+// +QIACT: <contextID>,<context_state>,<context_type>,<IP_address>
+//   +QIACT: 1,1,1,"10.64.1.23"
+//
+// <context_state>: 0 deactivated, 1 activated. A modem with no active PDP
+// context answers AT+QIACT? with a bare OK and no +QIACT: line
+int Satellite::cbQIACT(int type, const char* buf, int len, int* state)
+{
+    if ((type == TYPE_PLUS) && state) {
+        int id = -1;
+        int st = -1;
+        if (sscanf(buf, "\r\n+QIACT: %d,%d", &id, &st) == 2) {
+            if (id == 1) { // the one context this app activates
+                *state = st;
+            }
+        }
+    }
+    return WAIT;
+}
+
+// +QISTATE: <connectID>,<service_type>,<IP_address>,<remote_port>,<local_port>,
+//           <socket_state>,<context_ID>,<serverID>,<access_mode>,<AT_port>
+//   +QISTATE: 0,"UDP","3.231.157.58",40000,0,2,1,0,0,"cmux1"
+//
+// <socket_state>: 0 Initial, 1 Opening, 2 Connected, 3 Listening, 4 Closing.
+// Only 2 counts as usable. A modem that has been power-cycled answers
+// AT+QISTATE? with a bare OK and no +QISTATE: line at all
+int Satellite::cbQISTATE(int type, const char* buf, int len, int* state)
+{
+    if ((type == TYPE_PLUS) && state) {
+        int id = -1;
+        int st = -1;
+        if (sscanf(buf, "\r\n+QISTATE: %d,\"%*[^\"]\",\"%*[^\"]\",%*d,%*d,%d",
+                    &id, &st) == 2) {
+            if (id == UDP_CONNECT_ID) {
+                *state = st;
+            }
+        }
     }
     return WAIT;
 }
@@ -247,8 +274,8 @@ bool Satellite::locFixMatches(const GnssPositioningInfo& cur) const {
 }
 
 // Terrestrial (LTE) registration, for reporting only - it does NOT gate the
-// NTN connect path. NTN registration comes from AT+QENG="servingcell" (see
-// queryServingCell()); the two genuinely disagree, and each is authoritative
+// NTN connect path. NTN registration comes from AT+QENG="servingcell" 
+// the two genuinely disagree, and each is authoritative
 // for its own radio.
 //
 // AT+CEREG? cannot be read back by the application: Device OS consumes the
@@ -260,9 +287,6 @@ bool Satellite::locFixMatches(const GnssPositioningInfo& cur) const {
 // once it has registered:
 //   +COPS: 0                 - not registered
 //   +COPS: 0,0,"901 98",14   - registered to 901 98
-// so a non-empty operator name is the signal. AT+COPS=3,0 at init fixes
-// <format> to the long alphanumeric form that cbCOPS expects. The result is
-// cached in cellularOperator_ for the status line.
 int Satellite::queryCellularRegistration() {
     cellularOperator_[0] = '\0';
 
@@ -283,35 +307,36 @@ int Satellite::queryCellularRegistration() {
 //
 // SEARCH is the only state that counts as unregistered: it is the one state
 // where the modem holds no cell at all. LIMSRV means a cell has been found and
-// acquisition is progressing, so it is treated as registered - the alternative
-// is that the prolonged-no-registration recovery in updateRegistration()
-// toggles CFUN and throws away real acquisition progress. An empty state means
-// the QENG query itself failed, which is not evidence of registration.
+// acquisition is progressing, so it is treated as registered.
 static bool ntnRegistered(const char* state) {
     return state[0] && strcmp(state, "SEARCH") != 0;
 }
 
 // Query and parse the serving-cell report into servingCell_.
-//
 // This is the source of truth for NTN registration (via ntnRegistered() on
-// <state>) and also carries the signal metrics the status line prints. CEREG
-// and COPS describe the terrestrial radio and are not consulted here.
+// <state>) and also carries the signal metrics the status line prints
 int Satellite::queryServingCell() {
+    lastServingCellCheck_ = millis();
     servingCell_ = NtnServingCellInfo{};
     Cellular.command(cbQENG, &servingCell_, 2000, "AT+QENG=\"servingcell\"");
 
     return servingCell_.state[0] ? 0 : -1;
 }
 
+// Poll the modem with bare AT until it answers. Returns SYSTEM_ERROR_NONE once
+// it does, SYSTEM_ERROR_TIMEOUT after `tries` silent attempts, or the AT layer's
+// error for a hard failure.
 int Satellite::waitAtResponse(unsigned int tries, unsigned int timeout) {
     unsigned int attempt = 0;
     for (;;) {
         const int r = Cellular.command(timeout, "AT");
-        if (r < 0 && r != SYSTEM_ERROR_TIMEOUT) {
-            return r;
-        }
         if (r == RESP_OK) {
             return SYSTEM_ERROR_NONE;
+        }
+        if (r != WAIT) {
+            // A real answer that is not OK (RESP_ERROR and friends) - retrying
+            // will not change it.
+            return (r < 0) ? r : SYSTEM_ERROR_UNKNOWN;
         }
         if (++attempt >= tries) {
             break;
@@ -327,6 +352,9 @@ int Satellite::begin() {
     // assume we need to reconnect
     ntnInit_ = 0;
     ntnConnected_ = 0;
+    socketOpen_ = false;
+    socketSuspect_ = false;
+    lastSocketRebuild_ = 0; // let the first rebuild attempt run immediately
 
     if (!Cellular.isOn() || Cellular.isOff()) {
         // Turn on the modem
@@ -335,14 +363,6 @@ int Satellite::begin() {
             return SYSTEM_ERROR_TIMEOUT;
         }
     }
-
-    // We assume this check is already done by the requesting application
-    //
-    //
-    //  if (Particle.connected()) {
-    //      // It seems like we don't need to start up the Satellite connection
-    //      return SYSTEM_ERROR_INVALID_STATE;
-    //  }
 
     // Ensure cellular is set to disconnected, otherwise when we issue AT+CFUN=0
     // or other +C*REG: URCs pop up, Device OS may try to start up a PPP connection
@@ -398,7 +418,7 @@ int Satellite::begin() {
     Cellular.command(2000, "AT+CEREG?");
     Cellular.command(2000, "AT+COPS=3,0");
 
-    queryCellularRegistration(); // trace + seed cellularOperator_
+    queryCellularRegistration();
     queryServingCell();
     if (ntnRegistered(servingCell_.state)) {
         registered_ = 1;
@@ -550,14 +570,124 @@ int Satellite::processCellularTransport() {
 int Satellite::connect() {
     nwConnectionDesired_ = NW_STATE_CONNECT;
     nwConnected_ = NW_CONNECTED_INIT;
+    return 0;
+}
 
-    int cfunVal = -1;
-    if ( RESP_OK == Cellular.command(cbCFUN, &cfunVal, 180000, "AT+CFUN?") && cfunVal != 1 ) {
-        Cellular.command(180000, "AT+CFUN=1");
-        ModemManager::sendTerminalCapability();
+// Returns the raw <socket_state>, or -1 when the modem reports no socket for
+// UDP_CONNECT_ID at all (a bare OK), which is what a power cycle leaves behind.
+int Satellite::querySocketState() {
+    int state = -1;
+    Cellular.command(cbQISTATE, &state, 2000, "AT+QISTATE?");
+    socketOpen_ = (state == 2);
+    return state;
+}
+
+void Satellite::noteSocketLost(const char* why) {
+    socketOpen_ = false;
+    socketSuspect_ = false;
+    if (!ntnInit_ && !ntnConnected_ && nwConnected_ != NW_CONNECTED_SUCCESS) {
+        return; // already torn down, nothing to announce
+    }
+    Log.warn("NTN socket lost (%s); rebuilding data session", why);
+    proto_.disconnect();
+    ntnInit_ = 0;
+    ntnConnected_ = 0;
+    nwConnected_ = NW_CONNECTED_INIT;
+}
+
+bool Satellite::socketRebuildAllowed() {
+    return !lastSocketRebuild_ ||
+            (millis() - lastSocketRebuild_ >= SATELLITE_NCP_SOCKET_REBUILD_MS);
+}
+
+// Build (or rebuild) the modem-side data session: PDP context, the volatile hex
+// receive mode, and the UDP socket. Sets ntnInit_/socketOpen_ on success.
+int Satellite::openDataSession() {
+    lastSocketRebuild_ = millis();
+    socketSuspect_ = false;
+
+    // Device OS may be mid power-cycle. Confirm the modem answers at all 
+    // before committing to QIACT and QIOPEN
+    if (waitAtResponse(2, 1000) != SYSTEM_ERROR_NONE) {
+        Log.warn("Modem not responding; deferring NTN data-session rebuild");
+        ntnInit_ = 0;
+        socketOpen_ = false;
+        return -1;
     }
 
-    return 0;
+    int r = 0;
+#if USE_NON_IP
+    r = Cellular.command(2000, "AT+QCFGEXT=\"nipdcfg\",0,\"particle.io\"");
+    if (r == RESP_OK) {
+        r = Cellular.command(2000, "AT+QCFGEXT=\"nipdcfg\"");
+    }
+    if (r == RESP_OK) {
+        r = Cellular.command(2000, "AT+QCFGEXT=\"nipd\",1,30");
+        ntnInit_ = 1;
+    } else {
+        ntnInit_ = 0;
+    }
+#else
+    // A socket left in a non-usable state (Opening/Listening/Closing) holds the
+    // id and would make QIOPEN fail; close it first.
+    const int sockState = querySocketState();
+    if (sockState >= 0 && sockState != 2) {
+        Log.info("Closing stale NTN socket (state %d)", sockState);
+        Cellular.command(2000, "AT+QICLOSE=%d", UDP_CONNECT_ID);
+    }
+
+    Cellular.command(2000, "AT+QICSGP=1");
+    Cellular.command(2000, "AT+QIACT?");
+
+    Cellular.command(2000, "AT+QICSGP=1,1,\"360Connect\"");
+    r = Cellular.command(150 * 1000, "AT+QIACT=1");
+
+    int actState = -1;
+    Cellular.command(cbQIACT, &actState, 2000, "AT+QIACT?");
+    if (r != RESP_OK || actState != 1) {
+        Log.warn("PDP context not active (QIACT=%d, state=%d); deferring NTN socket open",
+                r, actState);
+        ntnInit_ = 0;
+        socketOpen_ = false;
+        return -1;
+    }
+
+    Cellular.command(2000, "AT+QICFG=\"dataformat\",0,1");
+
+    r = Cellular.command(150 * 1000, "AT+QIOPEN=1,%d,\"UDP\",\"%u.%u.%u.%u\",%u", UDP_CONNECT_ID,
+            (unsigned)kUdpEndpointIp[0], (unsigned)kUdpEndpointIp[1],
+            (unsigned)kUdpEndpointIp[2], (unsigned)kUdpEndpointIp[3],
+            (unsigned)kUdpPort);
+
+    if (r != RESP_OK) {
+        Log.warn("QIOPEN rejected: %d", r);
+        querySocketState();
+        ntnInit_ = 0;
+        return -1;
+    }
+
+    // QIOPEN's OK only means the request was accepted. The outcome comes back
+    // asynchronously as "+QIOPEN: <id>,<err>", which is too late to gate on and
+    // would otherwise be parsed as part of whatever command runs next. Ask the
+    // modem what the socket actually is instead: QISTATE reporting Connected is
+    // the only proof it is usable.
+    unsigned int tries = SATELLITE_NCP_SOCKET_CONFIRM_TRIES;
+    for (;;) {
+        if (querySocketState() == 2) {
+            break;
+        }
+        if (--tries == 0) {
+            break;
+        }
+        delay(SATELLITE_NCP_SOCKET_CONFIRM_MS);
+    }
+
+    ntnInit_ = socketOpen_ ? 1 : 0;
+    if (!ntnInit_) {
+        Log.warn("QIOPEN did not yield a usable socket");
+    }
+#endif
+    return (ntnInit_ ? 0 : -1);
 }
 
 int Satellite::connectImpl() {
@@ -575,46 +705,10 @@ int Satellite::connectImpl() {
     lastConnectAttempt = millis();
 
     if (!ntnInit_) {
-        int r = 0;
-#if USE_NON_IP
-        r = Cellular.command(2000, "AT+QCFGEXT=\"nipdcfg\",0,\"particle.io\"");
-        if (r == RESP_OK) {
-            r = Cellular.command(2000, "AT+QCFGEXT=\"nipdcfg\"");
+        if (!socketRebuildAllowed()) {
+            return 0;
         }
-        if (r == RESP_OK) {
-            r = Cellular.command(2000, "AT+QCFGEXT=\"nipd\",1,30");
-            ntnInit_ = 1;
-        } else {
-            ntnInit_ = 0;
-        }
-#else
-        Cellular.command(2000, "AT+QICSGP=1");
-        Cellular.command(2000, "AT+QIACT?");
-
-        Cellular.command(2000, "AT+QICSGP=1,1,\"360Connect\"");
-        r = Cellular.command(150 * 1000, "AT+QIACT=1");
-        Cellular.command(2000, "AT+QIACT?");
-
-        // Hex receive mode (send stays text - QISENDEX is hex regardless):
-        // QIRD then returns datagrams as hex text, so payload bytes that look
-        // like line terminators (0x0a/0x0d) cannot shred the AT line parser.
-        // (Observed: a frame whose counter low byte was 0x0a came back
-        // interleaved with fragments of other AT responses.) Volatile modem
-        // setting, so (re)apply on every socket setup.
-        Cellular.command(2000, "AT+QICFG=\"dataformat\",0,1");
-
-        r = Cellular.command(150 * 1000, "AT+QIOPEN=1,%d,\"UDP\",\"%u.%u.%u.%u\",%u", UDP_CONNECT_ID,
-                (unsigned)kUdpEndpointIp[0], (unsigned)kUdpEndpointIp[1],
-                (unsigned)kUdpEndpointIp[2], (unsigned)kUdpEndpointIp[3],
-                (unsigned)kUdpPort);
-
-        if (r == RESP_OK) {
-            ntnInit_ = 1;
-        } else {
-            Cellular.command(2000, "AT+QISTATE?");
-            ntnInit_ = 0;
-        }
-#endif
+        openDataSession();
     }
 
     if (ntnInit_) {
@@ -645,6 +739,8 @@ int Satellite::disconnect() {
     nwConnected_ = NW_CONNECTED_INIT;
     ntnConnected_ = 0;
     ntnInit_ = 0;
+    socketOpen_ = false;
+    socketSuspect_ = false;
     registrationUpdateMs_ = SATELLITE_NCP_REGISTRATION_UPDATE_FAST_MS;
     registered_ = 0;
 
@@ -671,20 +767,9 @@ void Satellite::updateRegistration(bool force) {
     }
     lastRegistrationCheck_ = millis();
 
-    // Refresh the serving-cell report here so the decision is never made on
-    // stale data, and stamp the status-line timer so process() does not
-    // immediately re-poll the same command.
     queryServingCell();
-    lastServingCellCheck_ = lastRegistrationCheck_;
-
-    // Terrestrial registration: logged and cached for the status line, but it
-    // has no say in NTN registration state.
     queryCellularRegistration();
 
-    // An empty state means the QENG query itself failed (busy modem, AT
-    // timeout) rather than that the modem lost its cell - the old code guarded
-    // this the same way. Hold the previous state instead of tearing down a
-    // working session, and instead of inventing a registration we never saw.
     int r = servingCell_.state[0] ? ntnRegistered(servingCell_.state) : registered_;
 
     if (r) {
@@ -703,6 +788,8 @@ void Satellite::updateRegistration(bool force) {
         nwConnected_ = NW_CONNECTED_INIT;
         ntnInit_ = 0; // in case we de-registered, make sure NTN is re-initialized
         ntnConnected_ = 0;
+        socketOpen_ = false;
+        socketSuspect_ = false;
         if (!noRegistrationTimer_) {
             noRegistrationTimer_ = millis();
         } else if (millis() - noRegistrationTimer_ > SATELLITE_NCP_NO_REGISTRATION_MS) {
@@ -741,8 +828,16 @@ void Satellite::receiveData(void) {
             }
         }
 #else
-        Cellular.command(2000, "AT+QISTATE?");
+        if (querySocketState() != 2) {
+            socketSuspect_ = true;
+            return; // QIRD on a socket the modem does not have just ERRORs
+        }
+
         atResponse = Cellular.command(cbQIRDquery, &recv, 60 * 1000, "AT+QIRD=%d,0", UDP_CONNECT_ID);
+        if (RESP_OK != atResponse) {
+            // The socket was there a moment ago; let process() settle it.
+            socketSuspect_ = true;
+        }
         if ((RESP_OK == atResponse) && (recv > 0)) {
             if (recv > (int)kUdpRxBufferSize) {
                 // More buffered than one read carries (e.g. several queued
@@ -924,9 +1019,21 @@ int Satellite::tx(const uint8_t* buf, size_t len, int port) {
             break;
         }
         Log.warn("QISENDEX attempt %d/%d failed: %d", attempt, kMaxSendAttempts, r);
-        if (attempt != kMaxSendAttempts) {
-            delay(10000);
+        if (attempt == kMaxSendAttempts) {
+            break;
         }
+
+        if (querySocketState() != 2) {
+            if (registered_ && socketRebuildAllowed() && openDataSession() == 0) {
+                Log.info("Rebuilt NTN socket mid-send; retrying");
+                continue; // straight to the retry, no backoff delay
+            }
+            Log.warn("QISENDEX failed with no usable socket and no rebuild");
+            socketSuspect_ = true;
+            break;
+        }
+
+        delay(10000);
     }
 #endif
     // Send hex data
@@ -1029,6 +1136,9 @@ int Satellite::processErrors() {
         nwConnected_ = NW_CONNECTED_INIT;
         ntnInit_ = 0;
         ntnConnected_ = 0;
+        socketOpen_ = false;
+        socketSuspect_ = false;
+        lastSocketRebuild_ = 0; // rebuild immediately once the modem is back
     }
     // TODO: Check for uncommanded band change
     // 0000001817 [ncp.at] TRACE: > AT+QCFG="band"
@@ -1039,12 +1149,20 @@ int Satellite::processErrors() {
 
 int Satellite::process(bool force) {
     updateRegistration(force);
+
+    // Settle socket health at a safe point.
+    if (socketSuspect_ && connected()) {
+        socketSuspect_ = false;
+        if (querySocketState() != 2) {
+            noteSocketLost("QISTATE reports no usable socket");
+        }
+    }
+
     connectImpl();
     receiveData();
     processErrors();
     // Refresh the serving-cell signal report for status/diagnostics.
     if (force || millis() - lastServingCellCheck_ >= SATELLITE_NCP_SERVINGCELL_UPDATE_MS) {
-        lastServingCellCheck_ = millis();
         queryServingCell();
     }
     proto_.run();
@@ -1053,5 +1171,3 @@ int Satellite::process(bool force) {
 }
 
 } // namespace particle
-
-

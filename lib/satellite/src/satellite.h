@@ -211,7 +211,6 @@ private:
     uint32_t noRegistrationTimer_ = 0;
     int errorCount_ = 0;
 
-    bool socketOpen_ = false;
     bool socketSuspect_ = false;
     uint32_t lastSocketRebuild_ = 0;
     GnssPositioningInfo lastPositionInfo_;

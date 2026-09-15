@@ -47,7 +47,7 @@ static const size_t kUdpRxBufferSize = 320;
 
 // Canonical on-wire datagram cap for outbound frames on both transports: the
 // modem's AT-command body limit (256 raw bytes = 512 hex chars on the QISENDEX
-// line). 
+// line).
 static const size_t kMaxWireDatagramBytes = 256;
 
 namespace particle {
@@ -67,6 +67,11 @@ namespace {
 
 #define SATELLITE_NCP_COMM_ERRORS_MAX (3)
 #define SATELLITE_NCP_SOCKET_REBUILD_MS (30000)
+// AT+QISTATE <socket_state>: 0 Initial, 1 Opening, 2 Connected, 3 Listening,
+// 4 Closing. Only Connected is usable.
+#define SATELLITE_NCP_SOCKET_CONNECTED (2)
+#define SATELLITE_NCP_SOCKET_NONE (-1)
+#define SATELLITE_NCP_SOCKET_UNKNOWN (-2)
 #define SATELLITE_NCP_SOCKET_CONFIRM_TRIES (4)
 #define SATELLITE_NCP_SOCKET_CONFIRM_MS (500)
 
@@ -97,7 +102,7 @@ int Satellite::cbCFUN(int type, const char* buf, int len, int* cfun)
 int Satellite::cbCOPS(int type, const char* buf, int len, char* network)
 {
     if ((type == TYPE_PLUS) && network) {
-        if (sscanf(buf, "\r\n+COPS: %*d,%*d,\"%[^\"]\r\n", network) == 1)
+        if (sscanf(buf, "\r\n+COPS: %*d,%*d,\"%31[^\"]\r\n", network) == 1)
             /*nothing*/;
     }
     return WAIT;
@@ -274,7 +279,7 @@ bool Satellite::locFixMatches(const GnssPositioningInfo& cur) const {
 }
 
 // Terrestrial (LTE) registration, for reporting only - it does NOT gate the
-// NTN connect path. NTN registration comes from AT+QENG="servingcell" 
+// NTN connect path. NTN registration comes from AT+QENG="servingcell"; 
 // the two genuinely disagree, and each is authoritative
 // for its own radio.
 //
@@ -352,7 +357,6 @@ int Satellite::begin() {
     // assume we need to reconnect
     ntnInit_ = 0;
     ntnConnected_ = 0;
-    socketOpen_ = false;
     socketSuspect_ = false;
     lastSocketRebuild_ = 0; // let the first rebuild attempt run immediately
 
@@ -573,17 +577,19 @@ int Satellite::connect() {
     return 0;
 }
 
-// Returns the raw <socket_state>, or -1 when the modem reports no socket for
-// UDP_CONNECT_ID at all (a bare OK), which is what a power cycle leaves behind.
+// Returns the raw <socket_state>, SATELLITE_NCP_SOCKET_NONE when the modem
+// answers but reports no socket for UDP_CONNECT_ID (a bare OK, which is what a
+// power cycle leaves behind), or SATELLITE_NCP_SOCKET_UNKNOWN when the query
+// itself failed or timed out.
 int Satellite::querySocketState() {
-    int state = -1;
-    Cellular.command(cbQISTATE, &state, 2000, "AT+QISTATE?");
-    socketOpen_ = (state == 2);
+    int state = SATELLITE_NCP_SOCKET_NONE;
+    if (RESP_OK != Cellular.command(cbQISTATE, &state, 2000, "AT+QISTATE?")) {
+        return SATELLITE_NCP_SOCKET_UNKNOWN;
+    }
     return state;
 }
 
 void Satellite::noteSocketLost(const char* why) {
-    socketOpen_ = false;
     socketSuspect_ = false;
     if (!ntnInit_ && !ntnConnected_ && nwConnected_ != NW_CONNECTED_SUCCESS) {
         return; // already torn down, nothing to announce
@@ -601,7 +607,7 @@ bool Satellite::socketRebuildAllowed() {
 }
 
 // Build (or rebuild) the modem-side data session: PDP context, the volatile hex
-// receive mode, and the UDP socket. Sets ntnInit_/socketOpen_ on success.
+// receive mode, and the UDP socket. Sets ntnInit_ on success.
 int Satellite::openDataSession() {
     lastSocketRebuild_ = millis();
     socketSuspect_ = false;
@@ -611,7 +617,6 @@ int Satellite::openDataSession() {
     if (waitAtResponse(2, 1000) != SYSTEM_ERROR_NONE) {
         Log.warn("Modem not responding; deferring NTN data-session rebuild");
         ntnInit_ = 0;
-        socketOpen_ = false;
         return -1;
     }
 
@@ -631,7 +636,7 @@ int Satellite::openDataSession() {
     // A socket left in a non-usable state (Opening/Listening/Closing) holds the
     // id and would make QIOPEN fail; close it first.
     const int sockState = querySocketState();
-    if (sockState >= 0 && sockState != 2) {
+    if (sockState >= 0 && sockState != SATELLITE_NCP_SOCKET_CONNECTED) {
         Log.info("Closing stale NTN socket (state %d)", sockState);
         Cellular.command(2000, "AT+QICLOSE=%d", UDP_CONNECT_ID);
     }
@@ -648,7 +653,6 @@ int Satellite::openDataSession() {
         Log.warn("PDP context not active (QIACT=%d, state=%d); deferring NTN socket open",
                 r, actState);
         ntnInit_ = 0;
-        socketOpen_ = false;
         return -1;
     }
 
@@ -672,8 +676,10 @@ int Satellite::openDataSession() {
     // modem what the socket actually is instead: QISTATE reporting Connected is
     // the only proof it is usable.
     unsigned int tries = SATELLITE_NCP_SOCKET_CONFIRM_TRIES;
+    bool usable = false;
     for (;;) {
-        if (querySocketState() == 2) {
+        if (querySocketState() == SATELLITE_NCP_SOCKET_CONNECTED) {
+            usable = true;
             break;
         }
         if (--tries == 0) {
@@ -682,7 +688,7 @@ int Satellite::openDataSession() {
         delay(SATELLITE_NCP_SOCKET_CONFIRM_MS);
     }
 
-    ntnInit_ = socketOpen_ ? 1 : 0;
+    ntnInit_ = usable ? 1 : 0;
     if (!ntnInit_) {
         Log.warn("QIOPEN did not yield a usable socket");
     }
@@ -739,7 +745,6 @@ int Satellite::disconnect() {
     nwConnected_ = NW_CONNECTED_INIT;
     ntnConnected_ = 0;
     ntnInit_ = 0;
-    socketOpen_ = false;
     socketSuspect_ = false;
     registrationUpdateMs_ = SATELLITE_NCP_REGISTRATION_UPDATE_FAST_MS;
     registered_ = 0;
@@ -788,7 +793,6 @@ void Satellite::updateRegistration(bool force) {
         nwConnected_ = NW_CONNECTED_INIT;
         ntnInit_ = 0; // in case we de-registered, make sure NTN is re-initialized
         ntnConnected_ = 0;
-        socketOpen_ = false;
         socketSuspect_ = false;
         if (!noRegistrationTimer_) {
             noRegistrationTimer_ = millis();
@@ -828,7 +832,7 @@ void Satellite::receiveData(void) {
             }
         }
 #else
-        if (querySocketState() != 2) {
+        if (querySocketState() != SATELLITE_NCP_SOCKET_CONNECTED) {
             socketSuspect_ = true;
             return; // QIRD on a socket the modem does not have just ERRORs
         }
@@ -1013,6 +1017,10 @@ int Satellite::tx(const uint8_t* buf, size_t len, int port) {
 #else
     int dummy;
     int r = RESP_ERROR;
+    // At most one data-session rebuild per tx(): openDataSession() can spend
+    // minutes in QIACT/QIOPEN, and the rebuild throttle does not bound a second
+    // one because the first already outlasts SATELLITE_NCP_SOCKET_REBUILD_MS.
+    bool rebuildTried = false;
     for (int attempt = 1; attempt <= kMaxSendAttempts; ++attempt) {
         r = Cellular.command(cbQISENDEX, &dummy, 2000, "AT+QISENDEX=%d,\"%s\",0", UDP_CONNECT_ID, hexBuf.get());
         if (r == RESP_OK) {
@@ -1023,10 +1031,17 @@ int Satellite::tx(const uint8_t* buf, size_t len, int port) {
             break;
         }
 
-        if (querySocketState() != 2) {
-            if (registered_ && socketRebuildAllowed() && openDataSession() == 0) {
-                Log.info("Rebuilt NTN socket mid-send; retrying");
-                continue; // straight to the retry, no backoff delay
+        const int sockState = querySocketState();
+        if (sockState == SATELLITE_NCP_SOCKET_UNKNOWN) {
+            Log.warn("Socket state unknown after send failure; backing off");
+            socketSuspect_ = true;
+        } else if (sockState != SATELLITE_NCP_SOCKET_CONNECTED) {
+            if (!rebuildTried && registered_ && socketRebuildAllowed()) {
+                rebuildTried = true;
+                if (openDataSession() == 0) {
+                    Log.info("Rebuilt NTN socket mid-send; retrying");
+                    continue; // straight to the retry, no backoff delay
+                }
             }
             Log.warn("QISENDEX failed with no usable socket and no rebuild");
             socketSuspect_ = true;
@@ -1136,7 +1151,6 @@ int Satellite::processErrors() {
         nwConnected_ = NW_CONNECTED_INIT;
         ntnInit_ = 0;
         ntnConnected_ = 0;
-        socketOpen_ = false;
         socketSuspect_ = false;
         lastSocketRebuild_ = 0; // rebuild immediately once the modem is back
     }
@@ -1152,9 +1166,14 @@ int Satellite::process(bool force) {
 
     // Settle socket health at a safe point.
     if (socketSuspect_ && connected()) {
-        socketSuspect_ = false;
-        if (querySocketState() != 2) {
-            noteSocketLost("QISTATE reports no usable socket");
+        const int sockState = querySocketState();
+        if (sockState == SATELLITE_NCP_SOCKET_UNKNOWN) {
+            Log.warn("Socket state unknown; deferring socket-health decision");
+        } else {
+            socketSuspect_ = false;
+            if (sockState != SATELLITE_NCP_SOCKET_CONNECTED) {
+                noteSocketLost("QISTATE reports no usable socket");
+            }
         }
     }
 

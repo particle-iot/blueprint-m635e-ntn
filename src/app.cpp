@@ -248,58 +248,34 @@ const char* accessTechName(hal_net_access_tech_t rat) {
     publisher.publish("loc", locEvent);
 }
 
-// Example of an arbitrary named event. "event" is in the kEvents table so it
-// maps to that NTN code; any name not in the table falls back to
-// kDefaultNtnEventCode.
-//
-// This payload is sized so the datagram handed to AT+QISENDEX is exactly
-// kTargetWireBytes. Byte accounting, from the outside in:
-//
-//   150 = secure-UDP uplink overhead        9  KeyId(3)+CounterLow(2)+Tag(4)
-//       + constrained frame header          3  req type + REQUEST + request id
-//       + EventRequest.code (field 2)       2  tag + varint(3)
-//       + EventRequest.data (field 3)       3  tag + 2-byte length varint(133)
-//       + CBOR body                       133
-//
-//   133 = definite-length map(1) head       1  0xa1
-//       + "data" key text string            5  0x64 + 4 chars
-//       + value text string head            2  0x78 + 1 length byte
-//       + value characters                125  kDataValueLen
-//
-// Anything that changes the shape of the event (a second field, a longer key,
-// an event code >= 128, a value length outside 24..255) shifts these numbers,
-// so re-derive kDataValueLen if you edit the payload.
 static constexpr size_t kTargetWireBytes = 150;
+// Anything that changes the shape of the event shifts these numbers,
+// so re-derive kDataValueLen if you edit the payload.
 static constexpr size_t kDataValueLen = 125;
 
-// Packet counter for the event payload. Starts at 0 on boot and increments on
-// every publishEventExample() call, whether or not the publish is accepted.
 static uint32_t packetCounter = 0;
 
 // Builds the event data value: "Packet #<n> " followed by random ASCII, padded
 // to exactly kDataValueLen characters (plus a NUL). The random tail absorbs the
 // width of the prefix, so the value length - and the datagram - stay fixed as
 // the counter grows.
-static void buildEventData(char* buf, uint32_t counter) {
+static void publishFixedLengthRandomData() {
+    const uint32_t seq = packetCounter++;
+    char data[kDataValueLen + 1];
+
     static const char kCharset[] =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     constexpr size_t kCharsetLen = sizeof(kCharset) - 1; // drop the NUL
 
-    int n = snprintf(buf, kDataValueLen + 1, "Packet #%lu ", (unsigned long)counter);
+    int n = snprintf(data, kDataValueLen + 1, "Packet #%lu ", (unsigned long)seq);
     size_t off = 0;
     if (n > 0) {
         off = ((size_t)n > kDataValueLen) ? kDataValueLen : (size_t)n;
     }
     for (size_t i = off; i < kDataValueLen; ++i) {
-        buf[i] = kCharset[random(kCharsetLen)];
+        data[i] = kCharset[random(kCharsetLen)];
     }
-    buf[kDataValueLen] = '\0';
-}
-
-static void publishEventExample() {
-    const uint32_t seq = packetCounter++;
-    char data[kDataValueLen + 1];
-    buildEventData(data, seq);
+    data[kDataValueLen] = '\0';
 
     particle::Variant event;
     event.set("data", data);
@@ -309,9 +285,19 @@ static void publishEventExample() {
     publisher.publish("event", event);
 }
 
+static void publishEventExample() {
+    auto now = (unsigned int)Time.now();
+    particle::Variant event;
+    event.set("cmd", "test");
+    event.set("time", now);
+
+    publisher.publish("event", event);
+}
+
 void appPublishData() {
+    publishFixedLengthRandomData();
     // publishLocationExample();
-    publishEventExample();
+    // publishEventExample();
     publisher.logStats();
 }
 
@@ -462,12 +448,6 @@ void logBatteryStatus() {
 // Device status line: active profile, app state, time in
 // state, time until next publish, and the active radio's signal / band. Pass
 // force=true to print immediately (e.g. right after a radio switch).
-//
-// Token names here are deliberately stable and spelled out: field logs are
-// parsed downstream, so renaming or abbreviating a token is a breaking change.
-// Device OS caps a formatted log message at LOG_MAX_STRING_LENGTH (160) and
-// cuts the rest off with a trailing '~', so a fully populated line loses its
-// tail - accepted in preference to churning the format.
 void logStatusLine(bool force = false) {
     static uint32_t lastCheck = millis();
     if (!force && millis() - lastCheck <= 5000) {
@@ -502,9 +482,6 @@ void logStatusLine(bool force = false) {
                     "[Sig: %s (acquiring)]", c.state);
             }
         }
-        // Terrestrial registration alongside it: the two radios disagree
-        // routinely (LTE attached while NTN still searching, and vice versa),
-        // and only the NTN state above gates the satellite connect path.
         if (off < sizeof(line)) {
             const char* op = satellite.cellularOperator();
             off += snprintf(line + off, sizeof(line) - off,

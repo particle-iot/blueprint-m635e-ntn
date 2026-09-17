@@ -53,6 +53,7 @@ public:
     int esimEnable(char* specifiedIccid);
     int esimDisable(char* specifiedIccid);
     int esimProfiles(char* specifiedIccid, char* profilesBuffer, int profilesBufferLen);
+    static int sendTerminalCapability();   // ETSI TS 102 221 TERMINAL CAPABILITY; disables LPAe
     radio_type_t radioEnabled();
     int radioEnable(radio_type_t radio_type);
 
@@ -84,8 +85,8 @@ private:
     int csimCommand(unsigned int timeoutMs, const char* format, ...);
     int simIsoCla();                                                       // CLA for SELECT on the open channel
     int simGpCla();                                                        // CLA for STORE DATA / GET RESPONSE
-    bool simReady();                                                       // AT+CPIN? reports READY
-    int waitForSimReady(unsigned int timeoutMs);                           // poll until the card is back after a REFRESH
+    static bool simReady();                                                // AT+CPIN? reports READY
+    static int waitForSimReady(unsigned int timeoutMs);                    // poll until the card is back up
     int openSimChannel();                                                  // MANAGE CHANNEL open + SELECT ISD-R
     int closeSimChannel();                                                 // MANAGE CHANNEL close
     int storeProfileState(int type, const char* iccidNibbleSwapped, bool refresh); // ES10c Enable/Disable APDU (no CFUN)

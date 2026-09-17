@@ -653,14 +653,18 @@ int Satellite::openDataSession() {
     }
 
     Cellular.command(2000, "AT+QICSGP=1");
-    Cellular.command(2000, "AT+QIACT?");
 
     Cellular.command(2000, "AT+QICSGP=1,1,\"360Connect\"");
     r = Cellular.command(150 * 1000, "AT+QIACT=1");
+    if (r == WAIT) {
+        Log.warn("QIACT=1 timed out; modem still busy, deferring NTN socket open");
+        ntnInit_ = 0;
+        return -1;
+    }
 
     int actState = -1;
-    Cellular.command(cbQIACT, &actState, 2000, "AT+QIACT?");
-    if (r != RESP_OK || actState != 1) {
+    Cellular.command(cbQIACT, &actState, 150 * 1000, "AT+QIACT?");
+    if (actState != 1) {
         Log.warn("PDP context not active (QIACT=%d, state=%d); deferring NTN socket open",
                 r, actState);
         ntnInit_ = 0;

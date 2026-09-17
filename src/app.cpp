@@ -251,10 +251,6 @@ const char* accessTechName(hal_net_access_tech_t rat) {
 // -----------------------------------------------------------------------------
 // Raw NTN passthrough (g_cfg.ntnRawMode)
 // -----------------------------------------------------------------------------
-// In raw mode nothing wraps the payload: the bytes buildRawPayload() writes are
-// exactly the bytes in the UDP datagram, so the JSON length IS the on-wire
-// length. Keep it <= NTN_MAX_PAYLOAD_SIZE (256). 
-
 // Datagram cap on the NTN AT socket (256 raw bytes = 512 hex chars on the
 // QISENDEX line). The library rejects anything larger.
 static uint32_t packetCounter = 0;
@@ -269,15 +265,16 @@ static constexpr size_t kRawTargetWireBytes = 150;
 // fields, so the datagram size stays fixed as the counter grows. Replace the
 // body with whatever your test needs - this is the only function that decides
 // what goes on the wire in raw mode.
-static size_t buildRawPayload(char* buf, size_t cap) {
-    static const char kCharset[] =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    constexpr size_t kCharsetLen = sizeof(kCharset) - 1; // drop the NUL
+static const char kCharset[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+constexpr size_t kCharsetLen = sizeof(kCharset) - 1; // drop the NUL
 
+static size_t udpUpDownTestMessage(char* buf, size_t cap) {
     const size_t target = (kRawTargetWireBytes < cap) ? kRawTargetWireBytes : (cap - 1);
     const uint32_t seq = packetCounter++;
 
     // Everything except the random tail and the closing quote+brace.
+    // {"seq":32,"t":946689359,"data":"0lNmmbKc2H8SfS7If95q2FdoyPJm8yWqkxUVqgRhRrqzm7UCsJsFR4f5shAbtix5lFe8eAzXS0PyJatRslbNQm76bSEnUlfyaCEp8XhmuYnSGJ8KxqfT"}
     int n = snprintf(buf, cap, "{\"seq\":%lu,\"t\":%lu,\"data\":\"",
         (unsigned long)seq, (unsigned long)Time.now());
     if (n < 0 || (size_t)n + 2 >= target) {
@@ -295,6 +292,53 @@ static size_t buildRawPayload(char* buf, size_t cap) {
     buf[off] = '\0';
     return off;
 }
+
+static size_t udpUplinkTestMessage(char* buf, size_t cap) {
+    char randomBuf[kRawTargetWireBytes] = {};
+    JSONBufferWriter writer(buf, cap);
+
+    writer.beginObject();
+    writer.name("action").value("log");
+    writer.name("seq").value(packetCounter++);
+    writer.name("level").value("info");
+    writer.name("t").value((unsigned long)Time.now());
+    auto sizeRemaining = kRawTargetWireBytes - writer.dataSize() - 10; // 10 to account for  'msg', quotes, terminating brace, etc.
+    for (unsigned i = 0; i < (unsigned)sizeRemaining; i++) {
+        randomBuf[i] = kCharset[random(kCharsetLen)];
+    }
+    writer.name("msg").value(randomBuf);
+    writer.endObject();
+
+    return writer.dataSize();
+}
+
+static size_t udpDownlinkTestMessage(char* buf, size_t cap) {
+    static bool oneShot = false;
+    if (oneShot) {
+        return 0;
+    }
+
+    JSONBufferWriter writer(buf, cap);
+    writer.beginObject();
+    // // UDP Nat testing object to discover UDP NAT timeout value
+    // writer.name("action").value("schedule");
+    // writer.name("seq").value(packetCounter++);
+    // writer.name("mode").value("ramp");
+    // writer.name("startSec").value("1");
+    // writer.name("stepSec").value("1");
+    // writer.name("durationMin").value("242");
+
+    // Downlink test object with fix interval
+    writer.name("action").value("schedule");
+    writer.name("seq").value(packetCounter++);
+    writer.name("intervalSec").value("25");
+    writer.name("durationMin").value("242");
+    writer.endObject();
+
+    oneShot = true;
+    return writer.dataSize();
+}
+
 // ---- /EDIT ME ---------------------------------------------------------------
 
 // Raw downlink handler: whatever the test endpoint sends back arrives here
@@ -319,33 +363,40 @@ static void onRawDatagram(const uint8_t* data, size_t len) {
         (unsigned)len, text);
 }
 
-static void publishRawData() {
-    char buf[kRawPayloadMax];
-    const size_t n = buildRawPayload(buf, sizeof(buf));
+static int publishRawData() {
+    char buf[kRawPayloadMax] = {};
+    const size_t n = udpUplinkTestMessage(buf, sizeof(buf));
+    // const size_t n = udpDownlinkTestMessage(buf, sizeof(buf));
+    // const size_t n = udpUpDownTestMessage(buf, sizeof(buf));
     if (n == 0) {
-        return;
+        // Nothing to send this tick (build failure, or a one-shot message that
+        // has already gone out). Not a rate-limit, so the schedule advances
+        // instead of retrying every loop.
+        return SYSTEM_ERROR_INVALID_STATE;
     }
     Log.info("raw TX (%u bytes): %s", (unsigned)n, buf);
-    publisher.publishRaw((const uint8_t*)buf, n);
+    return publisher.publishRaw((const uint8_t*)buf, n);
 }
 
-static void publishEventExample() {
+static int publishEventExample() {
     auto now = (unsigned int)Time.now();
     particle::Variant event;
     event.set("cmd", "test");
     event.set("time", now);
 
-    publisher.publish("event", event);
+    return publisher.publish("event", event);
 }
 
-void appPublishData() {
+int appPublishData() {
+    int r;
     if (g_cfg.ntnRawMode) {
-        publishRawData();
+        r = publishRawData();
     } else {
         // publishLocationExample();
-        publishEventExample();
+        r = publishEventExample();
     }
     publisher.logStats();
+    return r;
 }
 
 // -----------------------------------------------------------------------------
@@ -388,9 +439,11 @@ static particle::Variant collectVitals() {
     return diag;
 }
 
-static void publishVitals() {
+static int publishVitals() {
     if (g_cfg.ntnRawMode) {
-        return;
+        // Vitals are suppressed in raw mode. Not a rate-limit, so the caller
+        // stamps the schedule and does not retry.
+        return SYSTEM_ERROR_INVALID_STATE;
     }
     // TODO: This is published as a generic event right now, but constrained device
     // service should be updated to handle these properly as a DIAGNOSTICS message 
@@ -399,26 +452,53 @@ static void publishVitals() {
     vitals.set("cmd", "vitals");
     vitals.set("time", (unsigned int)Time.now());
     vitals.set("diag", collectVitals());
-    publisher.publish("vitals", vitals);
+    return publisher.publish("vitals", vitals);
 }
 
+// A publish rejected purely because the shared NTN rate-limit bucket has not
+// opened yet (NTN_PUBLISH_INTERVAL_MIN_S, 30s) stays due and is retried, rather
+// than being stamped as sent - otherwise one rejection defers the next publish
+// by a whole interval. Retries are throttled because the publisher logs a line
+// for every rejection.
+static constexpr uint32_t kPublishRetryMs = 1000;
+
 static void runPublishTick() {
-    bool firstPublish = onEntry();
+    // onEntry() is true for a single loop() iteration, so latch the on-connect
+    // publishes: if the first attempt is rate-limited they must stay due.
+    static bool dataDueOnConnect = false;
+    static bool vitalsDueOnConnect = false;
+    static uint32_t lastDataAttempt = 0;
+    static uint32_t lastVitalsAttempt = 0;
+
+    if (onEntry()) {
+        dataDueOnConnect = true;
+        vitalsDueOnConnect = true;
+    }
     uint32_t now = millis();
+
+    // Data goes first on (re)connect: putting a datapoint on the wire as soon as
+    // the radio registers is the point of the on-connect publish, and vitals
+    // would otherwise take the bucket and push it out by a full interval.
+    bool dataDue = dataDueOnConnect ||
+                   (now - lastPublish > activePublishIntervalS() * 1000UL);
+    if (dataDue && now - lastDataAttempt >= kPublishRetryMs) {
+        lastDataAttempt = now;
+        if (appPublishData() != SYSTEM_ERROR_LIMIT_EXCEEDED) {
+            lastPublish = now;
+            dataDueOnConnect = false;
+        }
+    }
 
     // Vitals: always once on (re)connect, then every vitals_interval_s
     bool vitalsDue = g_cfg.vitalsIntervalS > 0 &&
-                     (now - lastVitals > g_cfg.vitalsIntervalS * 1000UL);
-    if (firstPublish || vitalsDue) {
-        publishVitals();
-        lastVitals = now;
-    }
-
-    if (firstPublish) {
-        lastPublish = now;
-    } else if (now - lastPublish > activePublishIntervalS() * 1000UL) {
-        appPublishData();
-        lastPublish = now;
+                     (vitalsDueOnConnect ||
+                      now - lastVitals > g_cfg.vitalsIntervalS * 1000UL);
+    if (vitalsDue && now - lastVitalsAttempt >= kPublishRetryMs) {
+        lastVitalsAttempt = now;
+        if (publishVitals() != SYSTEM_ERROR_LIMIT_EXCEEDED) {
+            lastVitals = now;
+            vitalsDueOnConnect = false;
+        }
     }
 }
 
@@ -583,7 +663,6 @@ void setup()
     int serialWaitTimeoutS = 10;
     System.getEnv("SERIAL_WAIT_TIMEOUT_S", serialWaitTimeoutS);
     waitFor(Serial.isConnected, serialWaitTimeoutS * 1000);
-    // WiFi.clearCredentials(); // force testing on Cellular/Satellite
 
     pinMode(D7, OUTPUT);
     digitalWrite(D7, LOW);
@@ -596,8 +675,7 @@ void setup()
     satellite.setMaxPayloadSize(g_cfg.ntnMaxPayloadSize);
 
     // Raw passthrough must be configured before the first satellite.begin():
-    // the endpoint is baked into AT+QIOPEN when the data session is built, and
-    // the mode gates the very first inbound poll.
+    // the endpoint is baked into AT+QIOPEN when the data session is built.
     if (g_cfg.ntnRawMode) {
         satellite.setEndpoint(
             IPAddress(g_cfg.rawEndpointIp[0], g_cfg.rawEndpointIp[1],

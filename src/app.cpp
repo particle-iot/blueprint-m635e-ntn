@@ -248,22 +248,198 @@ const char* accessTechName(hal_net_access_tech_t rat) {
     publisher.publish("loc", locEvent);
 }
 
-// Example of an arbitrary named event. "event" is in the kEvents table so it
-// maps to that NTN code; any name not in the table falls back to
-// kDefaultNtnEventCode.
-static void publishEventExample() {
+// -----------------------------------------------------------------------------
+// Field test harness / raw NTN passthrough (g_cfg.fieldTestEnabled)
+// -----------------------------------------------------------------------------
+// Datagram cap on the NTN AT socket (256 raw bytes = 512 hex chars on the
+// QISENDEX line). The library rejects anything larger.
+static uint32_t packetCounter = 0;
+static constexpr size_t kRawPayloadMax = 256;
+static constexpr size_t kRawTargetWireBytes = 150;
+
+// The uplink and round-trip messages are padded with random ASCII so every
+// datagram is exactly kRawTargetWireBytes on the wire: the padding absorbs the
+// width of the seq/time fields, so the size stays fixed as the counter grows.
+static const char kCharset[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+constexpr size_t kCharsetLen = sizeof(kCharset) - 1; // drop the NUL
+
+// Appends `name` with a random-ASCII value sized so the finished object lands on
+// exactly targetBytes. The charset is alphanumeric, so JSON escaping never
+// widens the value and the arithmetic is exact. Returns false if the fields
+// already written leave no room for it.
+static bool writeRandomPadding(JSONBufferWriter& writer, const char* name, size_t targetBytes) {
+    const size_t used = writer.dataSize();
+    const size_t overhead = strlen(name) + 7; // ,"name":""  plus the closing '}'
+    if (used + overhead >= targetBytes) {
+        Log.error("field test: no room for '%s' padding in %u bytes",
+            name, (unsigned)targetBytes);
+        return false;
+    }
+
+    char pad[kRawTargetWireBytes + 1];
+    size_t padLen = targetBytes - used - overhead;
+    if (padLen > sizeof(pad) - 1) {
+        padLen = sizeof(pad) - 1;
+    }
+    for (size_t i = 0; i < padLen; ++i) {
+        pad[i] = kCharset[random(kCharsetLen)];
+    }
+    pad[padLen] = '\0';
+
+    writer.name(name).value(pad);
+    return true;
+}
+
+static size_t finishTestMessage(JSONBufferWriter& writer, size_t cap) {
+    writer.endObject();
+    const size_t n = writer.dataSize();
+    if (n >= cap) {
+        Log.error("field test: payload needs %u bytes, buffer is %u",
+            (unsigned)n, (unsigned)cap);
+        return 0;
+    }
+    writer.buffer()[n] = '\0';
+    return n;
+}
+
+// ---- EDIT ME ----------------------------------------------------------------
+// The three field test payload builders. Each returns the number of bytes
+// written, or 0 when there is nothing to send this tick. FIELD_TEST_MODE in
+// env.json picks which one publishRawData() calls - these are the only
+// functions that decide what goes on the wire during a field test.
+
+// Uplink throughput / loss: a repeating log record padded out to a fixed size.
+// {"action":"log","seq":32,"level":"info","t":946689359,"msg":"0lNmmbKc2H8..."}
+static size_t udpUplinkTestMessage(char* buf,
+     size_t cap) {
+    JSONBufferWriter writer(buf, cap);
+    writer.beginObject();
+    writer.name("action").value("log");
+    writer.name("seq").value(packetCounter++);
+    writer.name("level").value("info");
+    // writer.name("ack").value(true); // Optional field to ask for a downlink ACK
+    writer.name("t").value((unsigned long)Time.now());
+    if (!writeRandomPadding(writer, "msg", kRawTargetWireBytes)) {
+        return 0;
+    }
+    return finishTestMessage(writer, cap);
+}
+
+// Downlink: a single request per boot asking the endpoint to start sending us
+// traffic on a schedule. Returns 0 on every later tick, so the publish schedule
+// advances instead of re-requesting.
+// {"action":"schedule","seq":0,"intervalSec":25,"durationMin":242}
+static size_t udpDownlinkTestMessage(char* buf, size_t cap) {
+    static bool oneShot = false;
+    if (oneShot) {
+        return 0;
+    }
+
+    JSONBufferWriter writer(buf, cap);
+    writer.beginObject();
+    // // UDP NAT testing object, to discover the UDP NAT timeout value
+    // writer.name("action").value("schedule");
+    // writer.name("seq").value(packetCounter++);
+    // writer.name("mode").value("ramp");
+    // writer.name("startSec").value(1);
+    // writer.name("stepSec").value(1);
+    // writer.name("durationMin").value(15);
+
+    // Downlink test object with a fixed interval
+    writer.name("action").value("schedule");
+    writer.name("seq").value(packetCounter++);
+    writer.name("intervalSec").value(25);
+    writer.name("durationMin").value(242);
+
+    const size_t n = finishTestMessage(writer, cap);
+    oneShot = (n != 0); // only latch once the request actually went out
+    return n;
+}
+
+// Round trip: the endpoint echoes this back verbatim, so the same fixed-size
+// datagram is measured in both directions.
+// {"action":"echo","seq":0,"t":946688240,"data":"W06JLlV6HQ6y6B..."}
+static size_t udpUpDownTestMessage(char* buf, size_t cap) {
+    JSONBufferWriter writer(buf, cap);
+    writer.beginObject();
+    writer.name("action").value("echo");
+    writer.name("seq").value(packetCounter++);
+    writer.name("t").value((unsigned long)Time.now());
+    if (!writeRandomPadding(writer, "data", kRawTargetWireBytes)) {
+        return 0;
+    }
+    return finishTestMessage(writer, cap);
+}
+
+// ---- /EDIT ME ---------------------------------------------------------------
+
+// Raw downlink handler: whatever the test endpoint sends back arrives here
+// verbatim, with no verification or decoding. Parse it here if your test needs
+// to act on downlinks.
+static uint32_t rawRxCount = 0;
+
+static void onRawDatagram(const uint8_t* data, size_t len) {
+    ++rawRxCount;
+
+    // NUL-terminate a printable copy for the log; the library has already
+    // logged the hex at trace level.
+    char text[kRawPayloadMax + 1];
+    const size_t n = (len < kRawPayloadMax) ? len : kRawPayloadMax;
+    for (size_t i = 0; i < n; ++i) {
+        const unsigned char c = data[i];
+        text[i] = (c >= 0x20 && c < 0x7f) ? (char)c : '.';
+    }
+    text[n] = '\0';
+
+    Log.info("raw RX #%lu (%u bytes): %s", (unsigned long)rawRxCount,
+        (unsigned)len, text);
+}
+
+static int publishRawData() {
+    char buf[kRawPayloadMax] = {};
+    size_t n = 0;
+    switch (g_cfg.fieldTestMode) {
+    case FieldTestMode::Downlink:
+        n = udpDownlinkTestMessage(buf, sizeof(buf));
+        break;
+    case FieldTestMode::UplinkDownlink:
+        n = udpUpDownTestMessage(buf, sizeof(buf));
+        break;
+    case FieldTestMode::Uplink:
+    default:
+        n = udpUplinkTestMessage(buf, sizeof(buf));
+        break;
+    }
+    if (n == 0) {
+        // Nothing to send this tick (build failure, or a one-shot message that
+        // has already gone out). Not a rate-limit, so the schedule advances
+        // instead of retrying every loop.
+        return SYSTEM_ERROR_INVALID_STATE;
+    }
+    Log.info("raw TX (%u bytes): %s", (unsigned)n, buf);
+    return publisher.publishRaw((const uint8_t*)buf, n);
+}
+
+static int publishEventExample() {
     auto now = (unsigned int)Time.now();
     particle::Variant event;
     event.set("cmd", "test");
     event.set("time", now);
 
-    publisher.publish("event", event);
+    return publisher.publish("event", event);
 }
 
-void appPublishData() {
-    // publishLocationExample();
-    publishEventExample();
+int appPublishData() {
+    int r;
+    if (g_cfg.fieldTestEnabled) {
+        r = publishRawData();
+    } else {
+        // publishLocationExample();
+        r = publishEventExample();
+    }
     publisher.logStats();
+    return r;
 }
 
 // -----------------------------------------------------------------------------
@@ -306,7 +482,12 @@ static particle::Variant collectVitals() {
     return diag;
 }
 
-static void publishVitals() {
+static int publishVitals() {
+    if (g_cfg.fieldTestEnabled) {
+        // Vitals are suppressed during a field test. Not a rate-limit, so the
+        // caller stamps the schedule and does not retry.
+        return SYSTEM_ERROR_INVALID_STATE;
+    }
     // TODO: This is published as a generic event right now, but constrained device
     // service should be updated to handle these properly as a DIAGNOSTICS message 
     // and processed the same as non NTN vitals. 
@@ -314,26 +495,53 @@ static void publishVitals() {
     vitals.set("cmd", "vitals");
     vitals.set("time", (unsigned int)Time.now());
     vitals.set("diag", collectVitals());
-    publisher.publish("vitals", vitals);
+    return publisher.publish("vitals", vitals);
 }
 
+// A publish rejected purely because the shared NTN rate-limit bucket has not
+// opened yet (NTN_PUBLISH_INTERVAL_MIN_S, 30s) stays due and is retried, rather
+// than being stamped as sent - otherwise one rejection defers the next publish
+// by a whole interval. Retries are throttled because the publisher logs a line
+// for every rejection.
+static constexpr uint32_t kPublishRetryMs = 1000;
+
 static void runPublishTick() {
-    bool firstPublish = onEntry();
+    // onEntry() is true for a single loop() iteration, so latch the on-connect
+    // publishes: if the first attempt is rate-limited they must stay due.
+    static bool dataDueOnConnect = false;
+    static bool vitalsDueOnConnect = false;
+    static uint32_t lastDataAttempt = 0;
+    static uint32_t lastVitalsAttempt = 0;
+
+    if (onEntry()) {
+        dataDueOnConnect = true;
+        vitalsDueOnConnect = true;
+    }
     uint32_t now = millis();
+
+    // Data goes first on (re)connect: putting a datapoint on the wire as soon as
+    // the radio registers is the point of the on-connect publish, and vitals
+    // would otherwise take the bucket and push it out by a full interval.
+    bool dataDue = dataDueOnConnect ||
+                   (now - lastPublish > activePublishIntervalS() * 1000UL);
+    if (dataDue && now - lastDataAttempt >= kPublishRetryMs) {
+        lastDataAttempt = now;
+        if (appPublishData() != SYSTEM_ERROR_LIMIT_EXCEEDED) {
+            lastPublish = now;
+            dataDueOnConnect = false;
+        }
+    }
 
     // Vitals: always once on (re)connect, then every vitals_interval_s
     bool vitalsDue = g_cfg.vitalsIntervalS > 0 &&
-                     (now - lastVitals > g_cfg.vitalsIntervalS * 1000UL);
-    if (firstPublish || vitalsDue) {
-        publishVitals();
-        lastVitals = now;
-    }
-
-    if (firstPublish) {
-        lastPublish = now;
-    } else if (now - lastPublish > activePublishIntervalS() * 1000UL) {
-        appPublishData();
-        lastPublish = now;
+                     (vitalsDueOnConnect ||
+                      now - lastVitals > g_cfg.vitalsIntervalS * 1000UL);
+    if (vitalsDue && now - lastVitalsAttempt >= kPublishRetryMs) {
+        lastVitalsAttempt = now;
+        if (publishVitals() != SYSTEM_ERROR_LIMIT_EXCEEDED) {
+            lastVitals = now;
+            vitalsDueOnConnect = false;
+        }
     }
 }
 
@@ -361,6 +569,53 @@ void updateConnectionTimers() {
         lastConnected = connected;
         connStateSince = millis();
     }
+}
+
+// -----------------------------------------------------------------------------
+// Battery status log
+// -----------------------------------------------------------------------------
+static constexpr uint32_t kBatteryLogIntervalMs = 60000;
+
+const char* batteryStateName(int state) {
+    switch (state) {
+        case BATTERY_STATE_NOT_CHARGING: return "not-charging";
+        case BATTERY_STATE_CHARGING:     return "charging";
+        case BATTERY_STATE_CHARGED:      return "charged";
+        case BATTERY_STATE_DISCHARGING:  return "discharging";
+        case BATTERY_STATE_FAULT:        return "fault";
+        case BATTERY_STATE_DISCONNECTED: return "disconnected";
+        default:                         return "unknown";
+    }
+}
+
+const char* powerSourceName(int source) {
+    switch (source) {
+        case POWER_SOURCE_VIN:         return "vin";
+        case POWER_SOURCE_USB_HOST:    return "usb-host";
+        case POWER_SOURCE_USB_ADAPTER: return "usb-adapter";
+        case POWER_SOURCE_USB_OTG:     return "usb-otg";
+        case POWER_SOURCE_BATTERY:     return "batt";
+        default:                       return "unknown";
+    }
+}
+
+void logBatteryStatus() {
+    static uint32_t lastCheck = millis();
+    if (millis() - lastCheck <= kBatteryLogIntervalMs) {
+        return;
+    }
+    lastCheck = millis();
+
+    static FuelGauge fuel;
+    const float volts = fuel.getVCell();
+    if (volts < 0) {
+        Log.info("[Batt: unavailable]");
+        return;
+    }
+
+    Log.info("[Batt: %.2fV %.1f%% %s src=%s]", volts, fuel.getNormalizedSoC(),
+        batteryStateName(System.batteryState()),
+        powerSourceName(System.powerSource()));
 }
 
 // Device status line: active profile, app state, time in
@@ -399,6 +654,11 @@ void logStatusLine(bool force = false) {
                 off += snprintf(line + off, sizeof(line) - off,
                     "[Sig: %s (acquiring)]", c.state);
             }
+        }
+        if (off < sizeof(line)) {
+            const char* op = satellite.cellularOperator();
+            off += snprintf(line + off, sizeof(line) - off,
+                "[Cell: %s]", op[0] ? op : "unreg");
         }
     }
 
@@ -446,7 +706,6 @@ void setup()
     int serialWaitTimeoutS = 10;
     System.getEnv("SERIAL_WAIT_TIMEOUT_S", serialWaitTimeoutS);
     waitFor(Serial.isConnected, serialWaitTimeoutS * 1000);
-    // WiFi.clearCredentials(); // force testing on Cellular/Satellite
 
     pinMode(D7, OUTPUT);
     digitalWrite(D7, LOW);
@@ -457,6 +716,16 @@ void setup()
     loadAppConfig();
 
     satellite.setMaxPayloadSize(g_cfg.ntnMaxPayloadSize);
+
+    // Raw passthrough must be configured before the first satellite.begin():
+    // the endpoint is baked into AT+QIOPEN when the data session is built.
+    if (g_cfg.fieldTestEnabled) {
+        satellite.setEndpoint(
+            IPAddress(g_cfg.fieldTestEndpointIp[0], g_cfg.fieldTestEndpointIp[1],
+                      g_cfg.fieldTestEndpointIp[2], g_cfg.fieldTestEndpointIp[3]),
+            (uint16_t)g_cfg.fieldTestEndpointPort);
+        satellite.setRawMode(true, onRawDatagram);
+    }
 
     modem.begin();
 
@@ -471,6 +740,7 @@ void loop()
 {
     updateConnectionTimers();
     logStatusLine();
+    logBatteryStatus();
 
     switch (appState) {
         // --------------------------------------------------------------------

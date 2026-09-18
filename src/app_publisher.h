@@ -74,6 +74,17 @@ public:
     // any rejection; the reason is reflected in stats().
     int publish(const char* name, const particle::Variant& data);
 
+    // Raw passthrough send: `data` goes on the wire byte-for-byte - no event
+    // code, no CBOR, no constrained frame, no secure-UDP wrapper. Only valid on
+    // the satellite radio with raw mode enabled in the library
+    // (Satellite::setRawMode()). Shares the NTN rate-limit bucket and the
+    // ntn*/oversized/dropped counters with the constrained path so cadence and
+    // stats stay directly comparable between the two modes.
+    //
+    // Returns 0 on AT-accepted send; negative on any rejection, with the reason
+    // reflected in stats().
+    int publishRaw(const uint8_t* data, size_t len);
+
     const Stats& stats() const { return stats_; }
     void logStats() const;
 

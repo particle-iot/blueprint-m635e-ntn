@@ -56,25 +56,90 @@ void applyU32Env(const char* key, uint32_t& dest) {
     }
 }
 
-constexpr const char* kEnvLocationFixed = "PARTICLE_LOCATION_FIXED";
-
-// Returns true only when the env var is present AND parses to valid coordinates.
-bool applyFixedLocationEnv() {
+// Dotted-quad IPv4: overwrite `dest` only when the variable is present AND all
+// four octets parse and fit in a byte. Numeric only - there is no DNS on the
+// NTN path.
+void applyIpEnv(const char* key, uint8_t (&dest)[4]) {
     String val;
-    if (!System.getEnv(kEnvLocationFixed, val)) {
+    if (!System.getEnv(key, val)) {
+        if (System.hasEnv(key)) {
+            cfgLog.warn("env '%s' unreadable; using default", key);
+        }
+        return;
+    }
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    if (sscanf(val.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4 ||
+            a > 255 || b > 255 || c > 255 || d > 255) {
+        cfgLog.warn("env '%s'='%s' is not a dotted-quad IPv4 address; using default",
+            key, val.c_str());
+        return;
+    }
+    dest[0] = (uint8_t)a;
+    dest[1] = (uint8_t)b;
+    dest[2] = (uint8_t)c;
+    dest[3] = (uint8_t)d;
+}
+
+struct FieldTestModeName {
+    const char*   text;
+    FieldTestMode mode;
+};
+
+constexpr FieldTestModeName kFieldTestModes[] = {
+    { "uplink",         FieldTestMode::Uplink         },
+    { "downlink",       FieldTestMode::Downlink       },
+    { "uplinkdownlink", FieldTestMode::UplinkDownlink },
+};
+
+const char* fieldTestModeName(FieldTestMode mode) {
+    for (const auto& m : kFieldTestModes) {
+        if (m.mode == mode) {
+            return m.text;
+        }
+    }
+    return "unknown";
+}
+
+void applyFieldTestModeEnv(const char* key, FieldTestMode& dest) {
+    String val;
+    if (!System.getEnv(key, val)) {
+        if (System.hasEnv(key)) {
+            cfgLog.warn("env '%s' unreadable; using default", key);
+        }
+        return;
+    }
+    for (const auto& m : kFieldTestModes) {
+        if (val == m.text) {
+            dest = m.mode;
+            return;
+        }
+    }
+    cfgLog.warn("env '%s'='%s' is not one of uplink/downlink/uplinkdownlink; using default",
+        key, val.c_str());
+}
+
+constexpr const char* kEnvLocationFixed     = "PARTICLE_LOCATION_FIXED";
+constexpr const char* kEnvFieldTestLocation = "FIELD_TEST_LOCATION";
+
+// Parses "<lat>,<lon>,<alt>" from `key` into g_cfg.locFixed*. Returns true only
+// when the variable is present AND parses to valid coordinates, so the caller
+// can fall through to a lower-priority key.
+bool applyFixedLocationEnv(const char* key) {
+    String val;
+    if (!System.getEnv(key, val)) {
         return false;
     }
     double lat = 0, lon = 0, alt = 0;
     if (sscanf(val.c_str(), "%lf,%lf,%lf", &lat, &lon, &alt) != 3) {
-        cfgLog.warn("env '%s'='%s' not in '<lat>,<lon>,<alt>' form; using defaults",
-            kEnvLocationFixed, val.c_str());
+        cfgLog.warn("env '%s'='%s' not in '<lat>,<lon>,<alt>' form; ignoring",
+            key, val.c_str());
         return false;
     }
     g_cfg.locFixedLatitude = lat;
     g_cfg.locFixedLongitude = lon;
     g_cfg.locFixedAltitude = alt;
     cfgLog.info("env '%s' sets fixed location: (%f, %f, %f)",
-        kEnvLocationFixed, lat, lon, alt);
+        key, lat, lon, alt);
     return true;
 }
 } // namespace
@@ -91,6 +156,10 @@ AppConfig g_cfg = {
     /* ntnPublishIntervalS            */ 3 * 60,
     /* vitalsIntervalS                */ 10 * 60,
     /* ntnMaxPayloadSize              */ 256,
+    /* fieldTestEnabled               */ false,
+    /* fieldTestMode                  */ FieldTestMode::Uplink,
+    /* fieldTestEndpointIp            */ { 3, 231, 157, 58 },
+    /* fieldTestEndpointPort          */ 40000,
     /* cellularDisconnectedTimeoutS   */ 10 * 60,
     /* satelliteConnectedTimeoutS     */ 10 * 60,
     /* satelliteDisconnectedTimeoutS  */ 10 * 60,
@@ -119,6 +188,10 @@ void loadAppConfig() {
     applyU32Env      ("NTN_PUBLISH_INTERVAL_S",             g_cfg.ntnPublishIntervalS);
     applyU32Env      ("VITALS_INTERVAL_S",                  g_cfg.vitalsIntervalS);
     applyU32Env      ("NTN_MAX_PAYLOAD_SIZE",               g_cfg.ntnMaxPayloadSize);
+    applyBoolEnv     ("FIELD_TEST_ENABLED",                 g_cfg.fieldTestEnabled);
+    applyFieldTestModeEnv("FIELD_TEST_MODE",                g_cfg.fieldTestMode);
+    applyIpEnv       ("FIELD_TEST_ENDPOINT_IP",             g_cfg.fieldTestEndpointIp);
+    applyU32Env      ("FIELD_TEST_ENDPOINT_PORT",           g_cfg.fieldTestEndpointPort);
     applyU32Env      ("CELLULAR_DISCONNECTED_TIMEOUT_S",    g_cfg.cellularDisconnectedTimeoutS);
     applyU32Env      ("SATELLITE_CONNECTED_TIMEOUT_S",      g_cfg.satelliteConnectedTimeoutS);
     applyU32Env      ("SATELLITE_DISCONNECTED_TIMEOUT_S",   g_cfg.satelliteDisconnectedTimeoutS);
@@ -129,17 +202,39 @@ void loadAppConfig() {
     applyBoolEnv     ("USE_ONBOARD_GNSS_FOR_LOCATION",      g_cfg.useOnboardGnssForLocation);
     applyU32Env      ("ONBOARD_GNSS_FIX_TIMEOUT_S",         g_cfg.onboardGnssFixTimeoutS);
 
+    // Settle fieldTestEnabled before anything below reads it: an unusable
+    // endpoint port disables the harness outright.
+    if (g_cfg.fieldTestEndpointPort == 0 || g_cfg.fieldTestEndpointPort > 65535) {
+        cfgLog.warn("FIELD_TEST_ENDPOINT_PORT %lu out of range; field test disabled",
+            (unsigned long)g_cfg.fieldTestEndpointPort);
+        g_cfg.fieldTestEnabled = false;
+    }
+
     // Fixed coordinates come as a single "lat,lon,alt" value (decimal degrees /
     // metres). Used directly when GNSS is disabled, and as the fallback when the
     // onboard GNSS engine fails to get a fix.
-    const bool haveFixedLocation = applyFixedLocationEnv();
+    //
+    // FIELD_TEST_LOCATION overrides the cloud-managed PARTICLE_LOCATION_FIXED,
+    // but only while the field test harness is on - so the key can stay in
+    // env.json between tests without moving the device's normal location. A
+    // malformed value warns and falls through to PARTICLE_LOCATION_FIXED.
+    bool haveFixedLocation = false;
+    if (g_cfg.fieldTestEnabled) {
+        haveFixedLocation = applyFixedLocationEnv(kEnvFieldTestLocation);
+    } else if (System.hasEnv(kEnvFieldTestLocation)) {
+        cfgLog.info("env '%s' ignored: FIELD_TEST_ENABLED is false",
+            kEnvFieldTestLocation);
+    }
+    if (!haveFixedLocation) {
+        haveFixedLocation = applyFixedLocationEnv(kEnvLocationFixed);
+    }
 
     // When GNSS is disabled the fixed coords are the device's only location, so
     // warn if they were not supplied.
     if (!g_cfg.useOnboardGnssForLocation && !haveFixedLocation) {
-        cfgLog.warn("USE_ONBOARD_GNSS_FOR_LOCATION is false but '%s' is missing or invalid; "
-            "using compiled default coordinates (%f, %f, %f)",
-            kEnvLocationFixed,
+        cfgLog.warn("USE_ONBOARD_GNSS_FOR_LOCATION is false but neither '%s' nor '%s' "
+            "is set to valid coordinates; using compiled defaults (%f, %f, %f)",
+            kEnvFieldTestLocation, kEnvLocationFixed,
             g_cfg.locFixedLatitude, g_cfg.locFixedLongitude, g_cfg.locFixedAltitude);
     }
 
@@ -167,6 +262,14 @@ void loadAppConfig() {
         (unsigned long)g_cfg.ntnPublishIntervalS,
         (unsigned long)g_cfg.vitalsIntervalS,
         (unsigned long)g_cfg.ntnMaxPayloadSize);
+    if (g_cfg.fieldTestEnabled) {
+        cfgLog.warn("  *** FIELD TEST MODE *** mode=%s dst=%u.%u.%u.%u:%lu - "
+            "no constrained protocol, no secure UDP, no vitals",
+            fieldTestModeName(g_cfg.fieldTestMode),
+            (unsigned)g_cfg.fieldTestEndpointIp[0], (unsigned)g_cfg.fieldTestEndpointIp[1],
+            (unsigned)g_cfg.fieldTestEndpointIp[2], (unsigned)g_cfg.fieldTestEndpointIp[3],
+            (unsigned long)g_cfg.fieldTestEndpointPort);
+    }
     cfgLog.info("  switch timeouts: cellDis=%lus satCon=%lus satDis=%lus",
         (unsigned long)g_cfg.cellularDisconnectedTimeoutS,
         (unsigned long)g_cfg.satelliteConnectedTimeoutS,

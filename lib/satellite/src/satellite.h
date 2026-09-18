@@ -22,6 +22,7 @@
 #include "system_error.h"
 #include "cloud_protocol.h"
 
+#include <functional>
 #include <optional>
 
 // Secure UDP Phase 1 (CDS-UDP-v1) wraps the NTN UDP path. Set to 0 to fall back
@@ -111,6 +112,37 @@ public:
     bool connected(void);
     int tx(const uint8_t* buf, size_t len, int port);
 
+    // ---- Raw passthrough mode (application testing) -----------------------
+    // Sends and receives datagrams with NO constrained protocol and NO secure
+    // UDP frame: the bytes handed to txRaw() are exactly the bytes on the wire,
+    // and inbound datagrams are handed back verbatim. Everything below the
+    // protocol layer is unchanged - registration, ntn_locfix, the PDP/socket
+    // lifecycle, the QISENDEX retry + socket-rebuild logic and process() all
+    // behave identically. Intended for talking to your own UDP test endpoint;
+    // the Particle ingress will not accept unauthenticated datagrams.
+    typedef std::function<void(const uint8_t* data, size_t len)> RawRxHandler;
+
+    // Enable/disable raw mode and install the downlink handler. Call before
+    // begin() so the first openDataSession() and the first inbound poll both
+    // see the mode. Passing nullptr keeps datagrams logged but undelivered.
+    void setRawMode(bool enabled, RawRxHandler onRx = nullptr);
+
+    bool rawMode(void) const {
+        return rawMode_;
+    }
+
+    // Raw uplink. Returns 0 on AT-accepted send, SYSTEM_ERROR_TOO_LARGE when
+    // len exceeds the on-wire cap (the full cap is available here - there is no
+    // secure-frame overhead to subtract), SYSTEM_ERROR_INVALID_STATE when the
+    // transport is not up.
+    int txRaw(const uint8_t* buf, size_t len);
+
+    // Override the UDP endpoint both transports send to. Must be called before
+    // begin() / beginCellularTransport(): the address is baked into AT+QIOPEN
+    // when the data session is built. Numeric IP only - DNS resolution over NTN
+    // is not feasible. Defaults to the Particle secure ingress.
+    void setEndpoint(const IPAddress& ip, uint16_t port);
+
     int publish(int code) {
         return proto_.publish(code);
     }
@@ -170,6 +202,13 @@ public:
         return servingCell_;
     };
 
+    // Terrestrial registration, as of the last registration poll: the operator
+    // name from AT+COPS?, or "" when the cellular radio is not registered.
+    // Independent of NTN registration - see queryCellularRegistration().
+    const char* cellularOperator(void) const {
+        return cellularOperator_;
+    };
+
 #if SECURE_UDP_ENABLED
     // Downlink secure-verification failures, split by mode: an attack signal
     // (badTag), normal retransmission noise (replay), and an operational
@@ -203,6 +242,9 @@ private:
     uint32_t registrationUpdateMs_ = 0;
     uint32_t noRegistrationTimer_ = 0;
     int errorCount_ = 0;
+
+    bool socketSuspect_ = false;
+    uint32_t lastSocketRebuild_ = 0;
     GnssPositioningInfo lastPositionInfo_;
     NtnServingCellInfo servingCell_;
 
@@ -217,6 +259,16 @@ private:
 
     size_t maxPayloadSize_ = 0;
     constrained::CloudProtocol proto_;
+
+    // UDP endpoint for both transports; overridable via setEndpoint(). Numeric
+    // IPs only - DNS resolution over NTN is not feasible.
+    IPAddress endpointIp_ = IPAddress(52, 5, 13, 97); // secure ingress
+    uint16_t  endpointPort_ = 9932;                   // secure ingress
+
+    // Raw passthrough: bypasses secure UDP + CloudProtocol in both directions.
+    // See setRawMode(). Nothing below the protocol layer is affected.
+    bool rawMode_ = false;
+    RawRxHandler rawRxHandler_;
 
     // Which byte transport tx()/receive uses under the constrained protocol.
     //   NTN_AT_SOCKET: app-owned modem, hex encode + AT+QISENDEX / AT+QIRD.
@@ -241,9 +293,15 @@ private:
 
     char publishBuffer[1024] = {};
 
+    // Last +COPS: <oper>, "" when the terrestrial radio is unregistered.
+    // Reporting only - NTN registration is owned by servingCell_.state.
+    char cellularOperator_[32] = {};
+
     static int cbCFUN(int type, const char* buf, int len, int* cfun);
     static int cbCOPS(int type, const char* buf, int len, char* network);
     static int cbQCFGEXTquery(int type, const char* buf, int len, int* rxlen);
+    static int cbQIACT(int type, const char* buf, int len, int* state);
+    static int cbQISTATE(int type, const char* buf, int len, int* state);
     static int cbQIRDquery(int type, const char* buf, int len, int* rxlen);
     static int cbQIRD(int type, const char* buf, int len, char* outBuf);
     static int cbQISENDEX(int type, const char* buf, int len, int* param);
@@ -253,10 +311,18 @@ private:
     static int cbQNWCFGNTNLOCFIX(int type, const char* buf, int len, GnssPositioningInfo* info);
 
     bool locFixMatches(const GnssPositioningInfo& cur) const;
-    int isRegistered(void);
+    int queryCellularRegistration(void);
     int queryServingCell(void);
+    int openDataSession(void);
+    int querySocketState(void);
+    bool socketRebuildAllowed(void);
+    void noteSocketLost(const char* why);
     int waitAtResponse(unsigned int tries, unsigned int timeout = 1000);
     int publishImpl(int code, const std::optional<Variant>& data = std::nullopt);
+    // Byte transport shared by tx() (secure-wrapped) and txRaw() (verbatim):
+    // Device OS UDP sendPacket, or hex encode + the AT+QISENDEX retry / socket
+    // rebuild loop.
+    int txBytes(const uint8_t* buf, size_t len);
     void updateRegistration(bool force = false);
 
     void receiveData(void);

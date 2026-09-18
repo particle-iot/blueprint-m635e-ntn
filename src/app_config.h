@@ -35,6 +35,12 @@
 
 static constexpr int NTN_PUBLISH_INTERVAL_MIN_S = 1;
 
+enum class FieldTestMode {
+    Uplink,
+    Downlink,
+    UplinkDownlink,
+};
+
 struct AppConfig {
     // ---- Feature toggles --------------------------------------------------
     // Enable / disable each connectivity stack at runtime. Both stacks are
@@ -84,26 +90,37 @@ struct AppConfig {
     // (the modem's AT-command body limit: 256 raw bytes = 512 hex chars).
     uint32_t ntnMaxPayloadSize;
 
-    // ---- Raw NTN passthrough (application testing) -----------------------
-    // When true, NTN data bypasses the constrained protocol and secure UDP in
-    // BOTH directions: appPublishData() sends the bytes from buildRawPayload()
-    // verbatim, and inbound datagrams are logged / handed to the app's raw
-    // handler instead of being verified and decoded. 
+    // ---- Field test harness (raw NTN passthrough) ------------------------
+    // When fieldTestEnabled is true, NTN data bypasses the constrained protocol
+    // and secure UDP in BOTH directions: appPublishData() sends the bytes from
+    // the selected udp*TestMessage() builder verbatim, and inbound datagrams are
+    // logged / handed to the app's raw handler instead of being verified and
+    // decoded.
     //
     // This is an exclusive mode: vitals and ordinary publishes are suppressed
     // while it is on, because a constrained-protocol frame injected into a raw
     // session would confuse whatever is listening at the other end.
     //
-    // rawEndpointIp/Port is the UDP destination the modem socket is opened
+    // fieldTestMode picks which test message goes on the wire - see
+    // FieldTestMode above.
+    //
+    // While the harness is on, a FIELD_TEST_LOCATION env value (same
+    // "<lat>,<lon>,<alt>" form as PARTICLE_LOCATION_FIXED) takes precedence as
+    // the source of locFixed* below, so a test can pin the position the modem
+    // attaches with without disturbing the cloud-managed value. It is ignored
+    // while fieldTestEnabled is false.
+    //
+    // fieldTestEndpointIp/Port is the UDP destination the modem socket is opened
     // against (AT+QIOPEN). Point it at your own echo/test server - the Particle
     // ingress will not accept unauthenticated datagrams. Only used when
-    // ntnRawMode is true; normal mode always uses the compiled-in ingress.
+    // fieldTestEnabled is true; normal mode always uses the compiled-in ingress.
     // Known endpoints:
     //   52.5.13.97:9932      secure ingress (default)
     //   3.231.157.58:40000   debug echo server "publish-receiver-udp.particle.io"
-    bool     ntnRawMode;
-    uint8_t  rawEndpointIp[4];
-    uint32_t rawEndpointPort;
+    bool          fieldTestEnabled;
+    FieldTestMode fieldTestMode;
+    uint8_t       fieldTestEndpointIp[4];
+    uint32_t      fieldTestEndpointPort;
 
     // ---- Radio switching timeouts ----------------------------------------
     // Seconds. It is NOT recommended to set these below 10 minutes (600 s) for
@@ -148,6 +165,8 @@ struct AppConfig {
     //           attach can still proceed.
     //   false : no GNSS antenna; always use the configured fixed coords. The
     //           GNSS engine is never queried.
+    // The fixed coords are sourced from FIELD_TEST_LOCATION when the field test
+    // harness is enabled, otherwise from PARTICLE_LOCATION_FIXED.
     bool      useOnboardGnssForLocation;
     uint32_t  onboardGnssFixTimeoutS;
     double    locFixedLatitude;

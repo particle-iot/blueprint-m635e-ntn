@@ -249,7 +249,7 @@ const char* accessTechName(hal_net_access_tech_t rat) {
 }
 
 // -----------------------------------------------------------------------------
-// Raw NTN passthrough (g_cfg.ntnRawMode)
+// Field test harness / raw NTN passthrough (g_cfg.fieldTestEnabled)
 // -----------------------------------------------------------------------------
 // Datagram cap on the NTN AT socket (256 raw bytes = 512 hex chars on the
 // QISENDEX line). The library rejects anything larger.
@@ -257,61 +257,79 @@ static uint32_t packetCounter = 0;
 static constexpr size_t kRawPayloadMax = 256;
 static constexpr size_t kRawTargetWireBytes = 150;
 
-// ---- EDIT ME ----------------------------------------------------------------
-// Builds the raw NTN test payload. Returns bytes written, or 0 on failure.
-//
-// Default: {"seq":<n>,"t":<epoch>,"data":"<random ascii>"} padded to exactly
-// kRawTargetWireBytes. The random tail absorbs the width of the seq/time
-// fields, so the datagram size stays fixed as the counter grows. Replace the
-// body with whatever your test needs - this is the only function that decides
-// what goes on the wire in raw mode.
+// The uplink and round-trip messages are padded with random ASCII so every
+// datagram is exactly kRawTargetWireBytes on the wire: the padding absorbs the
+// width of the seq/time fields, so the size stays fixed as the counter grows.
 static const char kCharset[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 constexpr size_t kCharsetLen = sizeof(kCharset) - 1; // drop the NUL
 
-static size_t udpUpDownTestMessage(char* buf, size_t cap) {
-    const size_t target = (kRawTargetWireBytes < cap) ? kRawTargetWireBytes : (cap - 1);
-    const uint32_t seq = packetCounter++;
-
-    // Everything except the random tail and the closing quote+brace.
-    // {"seq":32,"t":946689359,"data":"0lNmmbKc2H8SfS7If95q2FdoyPJm8yWqkxUVqgRhRrqzm7UCsJsFR4f5shAbtix5lFe8eAzXS0PyJatRslbNQm76bSEnUlfyaCEp8XhmuYnSGJ8KxqfT"}
-    int n = snprintf(buf, cap, "{\"seq\":%lu,\"t\":%lu,\"data\":\"",
-        (unsigned long)seq, (unsigned long)Time.now());
-    if (n < 0 || (size_t)n + 2 >= target) {
-        Log.error("raw payload prefix does not fit in %u bytes", (unsigned)target);
-        return 0;
+// Appends `name` with a random-ASCII value sized so the finished object lands on
+// exactly targetBytes. The charset is alphanumeric, so JSON escaping never
+// widens the value and the arithmetic is exact. Returns false if the fields
+// already written leave no room for it.
+static bool writeRandomPadding(JSONBufferWriter& writer, const char* name, size_t targetBytes) {
+    const size_t used = writer.dataSize();
+    const size_t overhead = strlen(name) + 7; // ,"name":""  plus the closing '}'
+    if (used + overhead >= targetBytes) {
+        Log.error("field test: no room for '%s' padding in %u bytes",
+            name, (unsigned)targetBytes);
+        return false;
     }
 
-    size_t off = (size_t)n;
-    const size_t tailEnd = target - 2; // room for the closing '"' and '}'
-    for (; off < tailEnd; ++off) {
-        buf[off] = kCharset[random(kCharsetLen)];
+    char pad[kRawTargetWireBytes + 1];
+    size_t padLen = targetBytes - used - overhead;
+    if (padLen > sizeof(pad) - 1) {
+        padLen = sizeof(pad) - 1;
     }
-    buf[off++] = '"';
-    buf[off++] = '}';
-    buf[off] = '\0';
-    return off;
+    for (size_t i = 0; i < padLen; ++i) {
+        pad[i] = kCharset[random(kCharsetLen)];
+    }
+    pad[padLen] = '\0';
+
+    writer.name(name).value(pad);
+    return true;
 }
 
-static size_t udpUplinkTestMessage(char* buf, size_t cap) {
-    char randomBuf[kRawTargetWireBytes] = {};
-    JSONBufferWriter writer(buf, cap);
+static size_t finishTestMessage(JSONBufferWriter& writer, size_t cap) {
+    writer.endObject();
+    const size_t n = writer.dataSize();
+    if (n >= cap) {
+        Log.error("field test: payload needs %u bytes, buffer is %u",
+            (unsigned)n, (unsigned)cap);
+        return 0;
+    }
+    writer.buffer()[n] = '\0';
+    return n;
+}
 
+// ---- EDIT ME ----------------------------------------------------------------
+// The three field test payload builders. Each returns the number of bytes
+// written, or 0 when there is nothing to send this tick. FIELD_TEST_MODE in
+// env.json picks which one publishRawData() calls - these are the only
+// functions that decide what goes on the wire during a field test.
+
+// Uplink throughput / loss: a repeating log record padded out to a fixed size.
+// {"action":"log","seq":32,"level":"info","t":946689359,"msg":"0lNmmbKc2H8..."}
+static size_t udpUplinkTestMessage(char* buf,
+     size_t cap) {
+    JSONBufferWriter writer(buf, cap);
     writer.beginObject();
     writer.name("action").value("log");
     writer.name("seq").value(packetCounter++);
     writer.name("level").value("info");
+    // writer.name("ack").value(true); // Optional field to ask for a downlink ACK
     writer.name("t").value((unsigned long)Time.now());
-    auto sizeRemaining = kRawTargetWireBytes - writer.dataSize() - 10; // 10 to account for  'msg', quotes, terminating brace, etc.
-    for (unsigned i = 0; i < (unsigned)sizeRemaining; i++) {
-        randomBuf[i] = kCharset[random(kCharsetLen)];
+    if (!writeRandomPadding(writer, "msg", kRawTargetWireBytes)) {
+        return 0;
     }
-    writer.name("msg").value(randomBuf);
-    writer.endObject();
-
-    return writer.dataSize();
+    return finishTestMessage(writer, cap);
 }
 
+// Downlink: a single request per boot asking the endpoint to start sending us
+// traffic on a schedule. Returns 0 on every later tick, so the publish schedule
+// advances instead of re-requesting.
+// {"action":"schedule","seq":0,"intervalSec":25,"durationMin":242}
 static size_t udpDownlinkTestMessage(char* buf, size_t cap) {
     static bool oneShot = false;
     if (oneShot) {
@@ -320,23 +338,38 @@ static size_t udpDownlinkTestMessage(char* buf, size_t cap) {
 
     JSONBufferWriter writer(buf, cap);
     writer.beginObject();
-    // // UDP Nat testing object to discover UDP NAT timeout value
+    // // UDP NAT testing object, to discover the UDP NAT timeout value
     // writer.name("action").value("schedule");
     // writer.name("seq").value(packetCounter++);
     // writer.name("mode").value("ramp");
-    // writer.name("startSec").value("1");
-    // writer.name("stepSec").value("1");
-    // writer.name("durationMin").value("242");
+    // writer.name("startSec").value(1);
+    // writer.name("stepSec").value(1);
+    // writer.name("durationMin").value(15);
 
-    // Downlink test object with fix interval
+    // Downlink test object with a fixed interval
     writer.name("action").value("schedule");
     writer.name("seq").value(packetCounter++);
-    writer.name("intervalSec").value("25");
-    writer.name("durationMin").value("242");
-    writer.endObject();
+    writer.name("intervalSec").value(25);
+    writer.name("durationMin").value(242);
 
-    oneShot = true;
-    return writer.dataSize();
+    const size_t n = finishTestMessage(writer, cap);
+    oneShot = (n != 0); // only latch once the request actually went out
+    return n;
+}
+
+// Round trip: the endpoint echoes this back verbatim, so the same fixed-size
+// datagram is measured in both directions.
+// {"action":"echo","seq":0,"t":946688240,"data":"W06JLlV6HQ6y6B..."}
+static size_t udpUpDownTestMessage(char* buf, size_t cap) {
+    JSONBufferWriter writer(buf, cap);
+    writer.beginObject();
+    writer.name("action").value("echo");
+    writer.name("seq").value(packetCounter++);
+    writer.name("t").value((unsigned long)Time.now());
+    if (!writeRandomPadding(writer, "data", kRawTargetWireBytes)) {
+        return 0;
+    }
+    return finishTestMessage(writer, cap);
 }
 
 // ---- /EDIT ME ---------------------------------------------------------------
@@ -365,9 +398,19 @@ static void onRawDatagram(const uint8_t* data, size_t len) {
 
 static int publishRawData() {
     char buf[kRawPayloadMax] = {};
-    const size_t n = udpUplinkTestMessage(buf, sizeof(buf));
-    // const size_t n = udpDownlinkTestMessage(buf, sizeof(buf));
-    // const size_t n = udpUpDownTestMessage(buf, sizeof(buf));
+    size_t n = 0;
+    switch (g_cfg.fieldTestMode) {
+    case FieldTestMode::Downlink:
+        n = udpDownlinkTestMessage(buf, sizeof(buf));
+        break;
+    case FieldTestMode::UplinkDownlink:
+        n = udpUpDownTestMessage(buf, sizeof(buf));
+        break;
+    case FieldTestMode::Uplink:
+    default:
+        n = udpUplinkTestMessage(buf, sizeof(buf));
+        break;
+    }
     if (n == 0) {
         // Nothing to send this tick (build failure, or a one-shot message that
         // has already gone out). Not a rate-limit, so the schedule advances
@@ -389,7 +432,7 @@ static int publishEventExample() {
 
 int appPublishData() {
     int r;
-    if (g_cfg.ntnRawMode) {
+    if (g_cfg.fieldTestEnabled) {
         r = publishRawData();
     } else {
         // publishLocationExample();
@@ -440,9 +483,9 @@ static particle::Variant collectVitals() {
 }
 
 static int publishVitals() {
-    if (g_cfg.ntnRawMode) {
-        // Vitals are suppressed in raw mode. Not a rate-limit, so the caller
-        // stamps the schedule and does not retry.
+    if (g_cfg.fieldTestEnabled) {
+        // Vitals are suppressed during a field test. Not a rate-limit, so the
+        // caller stamps the schedule and does not retry.
         return SYSTEM_ERROR_INVALID_STATE;
     }
     // TODO: This is published as a generic event right now, but constrained device
@@ -676,11 +719,11 @@ void setup()
 
     // Raw passthrough must be configured before the first satellite.begin():
     // the endpoint is baked into AT+QIOPEN when the data session is built.
-    if (g_cfg.ntnRawMode) {
+    if (g_cfg.fieldTestEnabled) {
         satellite.setEndpoint(
-            IPAddress(g_cfg.rawEndpointIp[0], g_cfg.rawEndpointIp[1],
-                      g_cfg.rawEndpointIp[2], g_cfg.rawEndpointIp[3]),
-            (uint16_t)g_cfg.rawEndpointPort);
+            IPAddress(g_cfg.fieldTestEndpointIp[0], g_cfg.fieldTestEndpointIp[1],
+                      g_cfg.fieldTestEndpointIp[2], g_cfg.fieldTestEndpointIp[3]),
+            (uint16_t)g_cfg.fieldTestEndpointPort);
         satellite.setRawMode(true, onRawDatagram);
     }
 

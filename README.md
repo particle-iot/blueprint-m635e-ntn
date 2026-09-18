@@ -73,6 +73,11 @@ All runtime behaviour is defined in a single top-level `env.json` file. Workbenc
 | `NTN_PUBLISH_INTERVAL_S` | uint | `180` | Seconds between publishes while on NTN. Cannot be set below `30`. |
 | `VITALS_INTERVAL_S` | uint | `600` | Seconds between periodic device-vitals publishes. Vitals are always published once on (re)connect regardless of this value; `0` disables the periodic refresh (on-connect only). |
 | `NTN_MAX_PAYLOAD_SIZE` | uint | `256` | Max on-wire datagram size for outbound NTN publishes, including the 9-byte Secure UDP overhead when enabled (the protocol frame gets the remainder). Clamped to the transport maximum of 256. |
+| `FIELD_TEST_ENABLED` | bool | `false` | Field test harness. When `true`, NTN data bypasses the constrained protocol and secure UDP in both directions: the message chosen by `FIELD_TEST_MODE` is sent verbatim to `FIELD_TEST_ENDPOINT_IP`:`FIELD_TEST_ENDPOINT_PORT`, and inbound datagrams are logged raw instead of being verified and decoded. Exclusive mode — see the note below the table. |
+| `FIELD_TEST_MODE` | string | `"uplink"` | Which test message goes on the wire while `FIELD_TEST_ENABLED` is `true`. `"uplink"` = repeating fixed-size log record, measures uplink throughput/loss. `"downlink"` = one request per boot asking the endpoint to start sending us traffic on a schedule. `"uplinkdownlink"` = repeating fixed-size record the endpoint echoes back, measures the round trip. An unrecognized value warns and falls back to `"uplink"`. |
+| `FIELD_TEST_ENDPOINT_IP` | string | `"3.231.157.58"` | Dotted-quad IPv4 of the UDP test endpoint the modem socket is opened against (`AT+QIOPEN`). Point it at your own echo/test server — the Particle ingress will not accept unauthenticated datagrams. Only used when `FIELD_TEST_ENABLED` is `true`. |
+| `FIELD_TEST_ENDPOINT_PORT` | uint | `40000` | UDP port of that endpoint. Out of range (`0` or `> 65535`) force-disables `FIELD_TEST_ENABLED`. |
+| `FIELD_TEST_LOCATION` | string | _(unset)_ | Optional `"<latitude>,<longitude>,<altitude>"` used as the NTN location fix while `FIELD_TEST_ENABLED` is `true`, taking precedence over `PARTICLE_LOCATION_FIXED`. Lets a field test pin the position the modem attaches with, without disturbing the cloud-managed value. Ignored entirely when `FIELD_TEST_ENABLED` is `false`; a malformed value warns and falls back to `PARTICLE_LOCATION_FIXED`. Still only a fallback when `USE_ONBOARD_GNSS_FOR_LOCATION` is `true` — a real GNSS fix wins. |
 | `CELLULAR_DISCONNECTED_TIMEOUT_S` | uint | `600` | Seconds disconnected on LTE before switching to Satellite. There is no cellular "connected" timeout — if LTE is up, we stay. |
 | `SATELLITE_CONNECTED_TIMEOUT_S` | uint | `600` | Seconds connected on Satellite before switching back to test Cellular again. |
 | `SATELLITE_DISCONNECTED_TIMEOUT_S` | uint | `600` | Seconds disconnected on Satellite (including while still acquiring — SEARCH/LIMSRV before attach) before switching back to Cellular. NTN attach can take minutes, so don't set this too low or the device gives up before it ever connects. |
@@ -82,9 +87,17 @@ All runtime behaviour is defined in a single top-level `env.json` file. Workbenc
 | `FORCE_S2C_SWITCH_TIMEOUT_S` | uint | `300` | Force-mode timeout for the NTN→LTE switch. Ignored unless `FORCE_SATELLITE_TO_CELLULAR_SWITCH` is true. |
 | `USE_ONBOARD_GNSS_FOR_LOCATION` | bool | `false` | Where the NTN location fix comes from. `false` = use the `PARTICLE_LOCATION_FIXED` coords below; never query the GNSS engine (no-antenna devices). `true` = use the onboard GNSS engine for up to `ONBOARD_GNSS_FIX_TIMEOUT_S`, then fall back to those coords. |
 | `ONBOARD_GNSS_FIX_TIMEOUT_S` | uint | `300` | Maximum seconds to wait for a GNSS fix when `USE_ONBOARD_GNSS_FOR_LOCATION` is `true` before giving up and using the fixed coords. Unused when it is `false`. |
-| `PARTICLE_LOCATION_FIXED` | string | `"44.92653,-93.39767,283"` | Fixed location as `"<latitude>,<longitude>,<altitude>"` in decimal degrees / meters. Used directly when GNSS is disabled, and as the fallback when GNSS is enabled. Warned about if missing/invalid while `USE_ONBOARD_GNSS_FOR_LOCATION` is `false`. |
+| `PARTICLE_LOCATION_FIXED` | string | `"44.92653,-93.39767,283"` | Fixed location as `"<latitude>,<longitude>,<altitude>"` in decimal degrees / meters. Used directly when GNSS is disabled, and as the fallback when GNSS is enabled. Superseded by `FIELD_TEST_LOCATION` while `FIELD_TEST_ENABLED` is `true`. Warned about if missing/invalid while `USE_ONBOARD_GNSS_FOR_LOCATION` is `false`. |
 | `PARTICLE_WIFI_ENABLE` | string | `false` | Disables Wi-Fi operation for sole focus on NTN and Cellular for this blueprint. |
 | `PARTICLE_BLE_ENABLE` | string | `false` | Disables BLE operation for sole focus on NTN and Cellular for this blueprint. |
+
+Field test mode is **exclusive**: while `FIELD_TEST_ENABLED` is `true`, device vitals and
+ordinary application publishes are both suppressed, because a constrained-protocol frame
+injected into a raw session would confuse whatever is listening at the other end. Set it
+back to `false` for normal operation. The message bodies themselves live in the
+`---- EDIT ME ----` block in `src/app.cpp` (`udpUplinkTestMessage()`,
+`udpDownlinkTestMessage()`, `udpUpDownTestMessage()`) — edit them there to change what a
+test puts on the wire.
 
 ### Example Configurations
 
